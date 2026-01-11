@@ -220,7 +220,7 @@ if __name__ == '__main__':
     
     if not TOKEN:
         print("Error: DISCORD_BOT_TOKEN environment variable not set!")
-        print("Set it with: set DISCORD_BOT_TOKEN=your_token_here")
+        print("Set it with: set DISCORD_TOKEN=your_token_here")
     else:
         keep_alive()
         bot.run(TOKEN)
