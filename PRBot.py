@@ -27,7 +27,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Database setup
-DB_NAME = 'pr_tracker.db'
+DB_NAME = '/data/pr_tracker.db'
 
 def init_db():
     """Initialize the database with required tables"""
