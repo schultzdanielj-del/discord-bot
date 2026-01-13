@@ -228,13 +228,21 @@ async def on_message(message):
     # Set your PR channel ID here
     PR_CHANNEL_ID = '1459000944028028970'
     
+    print(f"[DEBUG on_message] Message received in channel {message.channel.id}")
+    print(f"[DEBUG on_message] Content: '{message.content}'")
+    
     # Only process messages from the designated PR channel
     if str(message.channel.id) != PR_CHANNEL_ID:
+        print(f"[DEBUG on_message] Not the PR channel, skipping")
         await bot.process_commands(message)
         return
     
+    print(f"[DEBUG on_message] This is the PR channel, attempting to parse")
+    
     # Try to parse the message for multiple PR entries
     parsed_prs = parse_all_prs(message.content)
+    
+    print(f"[DEBUG on_message] Parsed {len(parsed_prs)} PR(s)")
     
     if parsed_prs:
         logged_count = 0
@@ -265,6 +273,8 @@ async def on_message(message):
             # Use different reactions for multiple PRs
             await message.add_reaction('✅')
             await message.add_reaction('💪')
+    else:
+        print(f"[DEBUG on_message] No valid PRs found in message")
     
     # Process other commands if any
     await bot.process_commands(message)
