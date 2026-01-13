@@ -65,25 +65,36 @@ def parse_all_prs(message_content):
     Parse multiple PR entries from a single message
     Returns: list of (exercise, weight, reps) tuples
     """
+    print(f"[DEBUG parse_all_prs] Input: '{message_content}'")
     prs = []
     text = message_content.strip()
     
     # Split by common delimiters that separate different exercises
     # Look for newlines or patterns that suggest a new exercise
     lines = text.split('\n')
+    print(f"[DEBUG parse_all_prs] Split into {len(lines)} lines")
     
-    for line in lines:
+    for i, line in enumerate(lines):
+        print(f"[DEBUG parse_all_prs] Processing line {i}: '{line}'")
         parsed = parse_single_pr(line)
         if parsed:
+            print(f"[DEBUG parse_all_prs] Line {i} parsed successfully")
             prs.append(parsed)
+        else:
+            print(f"[DEBUG parse_all_prs] Line {i} failed to parse")
     
     # If no newlines, try to find multiple PRs in a single line
     if not prs:
+        print(f"[DEBUG parse_all_prs] No PRs from line splitting, trying single line parse")
         # Look for multiple weight/rep patterns in one line
         parsed = parse_single_pr(text)
         if parsed:
+            print(f"[DEBUG parse_all_prs] Single line parsed successfully")
             prs.append(parsed)
+        else:
+            print(f"[DEBUG parse_all_prs] Single line failed to parse")
     
+    print(f"[DEBUG parse_all_prs] Total PRs found: {len(prs)}")
     return prs
 
 def normalize_exercise_name(exercise):
