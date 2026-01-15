@@ -57,6 +57,143 @@ def calculate_1rm(weight, reps):
     """Calculate estimated 1 rep max using Epley formula"""
     return (weight * reps * 0.0333) + weight
 
+def calculate_level(total_xp):
+    """Calculate level based on total XP. Each level requires 250 + (level * 250) XP"""
+    level = 1
+    xp_needed = 500  # Level 1 -> 2 requires 500 XP
+    
+    while total_xp >= xp_needed:
+        total_xp -= xp_needed
+        level += 1
+        xp_needed = 250 + (level * 250)
+    
+    return level
+
+def get_xp_for_next_level(current_level):
+    """Get XP needed for next level"""
+    return 250 + (current_level * 250)
+
+def add_xp(user_id, username, xp_amount, reason=""):
+    """Add XP to a user and check for level up"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # Get or create user XP record
+    c.execute('SELECT total_xp, level FROM user_xp WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    
+    if result:
+        old_xp, old_level = result
+        new_xp = old_xp + xp_amount
+    else:
+        old_xp, old_level = 0, 1
+        new_xp = xp_amount
+    
+    new_level = calculate_level(new_xp)
+    
+    # Update or insert user XP
+    timestamp = datetime.utcnow().isoformat()
+    c.execute('''
+        INSERT OR REPLACE INTO user_xp (user_id, username, total_xp, level, last_updated)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user_id, username, new_xp, new_level, timestamp))
+    
+    conn.commit()
+    conn.close()
+    
+    leveled_up = new_level > old_level
+    return new_xp, new_level, leveled_up, old_level
+
+def get_user_xp_info(user_id):
+    """Get user's XP and level information"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT total_xp, level FROM user_xp WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    
+    if result:
+        return result[0], result[1]
+    return 0, 1
+
+def can_award_weekly_log_xp(user_id):
+    """Check if user can receive weekly log XP (once per 6 days)"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # Get most recent weekly log
+    c.execute('''
+        SELECT timestamp FROM weekly_logs 
+        WHERE user_id = ? 
+        ORDER BY timestamp DESC 
+        LIMIT 1
+    ''', (user_id,))
+    
+    result = c.fetchone()
+    conn.close()
+    
+    if not result:
+        return True
+    
+    last_log_time = datetime.fromisoformat(result[0])
+    time_since_last = datetime.utcnow() - last_log_time
+    
+    # Must wait 6 days between weekly logs
+    return time_since_last.days >= 6
+
+def record_weekly_log(user_id, message_id, xp_awarded):
+    """Record a weekly log submission"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    timestamp = datetime.utcnow().isoformat()
+    c.execute('''
+        INSERT INTO weekly_logs (user_id, message_id, timestamp, xp_awarded)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, message_id, timestamp, xp_awarded))
+    
+    conn.commit()
+    conn.close()
+
+def can_award_core_foods_xp(user_id):
+    """Check if user can receive core foods XP today"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    today = datetime.utcnow().date().isoformat()
+    
+    c.execute('''
+        SELECT id FROM core_foods_checkins 
+        WHERE user_id = ? AND date = ?
+    ''', (user_id, today))
+    
+    result = c.fetchone()
+    conn.close()
+    
+    return result is None
+
+def record_core_foods_checkin(user_id, message_id, xp_awarded):
+    """Record a core foods check-in"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    today = datetime.utcnow().date().isoformat()
+    timestamp = datetime.utcnow().isoformat()
+    
+    try:
+        c.execute('''
+            INSERT INTO core_foods_checkins (user_id, date, message_id, timestamp, xp_awarded)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, today, message_id, timestamp, xp_awarded))
+        conn.commit()
+        success = True
+    except sqlite3.IntegrityError:
+        # Already checked in today
+        success = False
+    
+    conn.close()
+    return success
+
 def normalize_exercise_name(exercise):
     """Normalize exercise names to standardize variations"""
     exercise = exercise.lower().strip()
@@ -248,43 +385,107 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    """Monitor all messages in the specified channel"""
+    """Monitor all messages in the specified channels"""
     if message.author.bot:
         return
     
-    PR_CHANNEL_ID = '1459000944028028970'
+    channel_id = str(message.channel.id)
     
-    if str(message.channel.id) != PR_CHANNEL_ID:
-        await bot.process_commands(message)
-        return
-    
-    parsed_prs = parse_all_prs(message.content)
-    
-    if parsed_prs:
-        logged_count = 0
+    # Handle PR channel
+    if channel_id == PR_CHANNEL_ID:
+        parsed_prs = parse_all_prs(message.content)
         
-        for exercise, weight, reps in parsed_prs:
-            estimated_1rm = calculate_1rm(weight, reps)
+        if parsed_prs:
+            logged_count = 0
             
-            store_pr(
+            for exercise, weight, reps in parsed_prs:
+                estimated_1rm = calculate_1rm(weight, reps)
+                
+                store_pr(
+                    str(message.author.id),
+                    message.author.name,
+                    exercise,
+                    weight,
+                    reps,
+                    estimated_1rm,
+                    str(message.id),
+                    str(message.channel.id)
+                )
+                
+                logged_count += 1
+                print(f'Logged PR: {message.author.name} - {exercise} {weight}/{reps} (Est. 1RM: {estimated_1rm:.1f})')
+            
+            # Award XP for PRs (100 XP each) - silently
+            xp_earned = logged_count * 100
+            add_xp(
                 str(message.author.id),
                 message.author.name,
-                exercise,
-                weight,
-                reps,
-                estimated_1rm,
-                str(message.id),
-                str(message.channel.id)
+                xp_earned,
+                f"{logged_count} PR(s)"
             )
             
-            logged_count += 1
-            print(f'Logged PR: {message.author.name} - {exercise} {weight}/{reps} (Est. 1RM: {estimated_1rm:.1f})')
+            # React to confirm
+            if logged_count == 1:
+                await message.add_reaction('✅')
+            elif logged_count > 1:
+                await message.add_reaction('✅')
+                await message.add_reaction('💪')
+    
+    # Handle weekly logs channel
+    elif channel_id == LOGS_CHANNEL_ID:
+        # Check if message is long enough (300+ characters)
+        if len(message.content) >= 300:
+            if can_award_weekly_log_xp(str(message.author.id)):
+                # Award 800 XP for weekly log
+                xp_earned = 800
+                
+                # Bonus XP if message includes attachments (photos)
+                if message.attachments:
+                    xp_earned += 50
+                
+                add_xp(
+                    str(message.author.id),
+                    message.author.name,
+                    xp_earned,
+                    "Weekly log"
+                )
+                
+                record_weekly_log(str(message.author.id), str(message.id), xp_earned)
+                
+                await message.add_reaction('📝')
+                await message.add_reaction('✅')
+            else:
+                # Too soon for another weekly log
+                await message.add_reaction('⏰')
+    
+    # Handle core foods channel
+    elif channel_id == CORE_FOODS_CHANNEL_ID:
+        # Check if this message might be a core foods check-in
+        # Look for keywords to differentiate from PRs
+        content_lower = message.content.lower()
+        core_foods_keywords = ['core foods', 'core', 'food', 'ate', 'eating', 'meal', 'diet', 'nutrition', 'check in', 'checkin']
         
-        if logged_count == 1:
-            await message.add_reaction('✅')
-        elif logged_count > 1:
-            await message.add_reaction('✅')
-            await message.add_reaction('💪')
+        # If message contains core foods keywords, treat as check-in
+        if any(keyword in content_lower for keyword in core_foods_keywords):
+            if can_award_core_foods_xp(str(message.author.id)):
+                # Award 200 XP for daily core foods check-in
+                xp_earned = 200
+                
+                add_xp(
+                    str(message.author.id),
+                    message.author.name,
+                    xp_earned,
+                    "Core foods check-in"
+                )
+                
+                success = record_core_foods_checkin(str(message.author.id), str(message.id), xp_earned)
+                
+                if success:
+                    await message.add_reaction('🍎')
+                    await message.add_reaction('✅')
+            else:
+                # Already checked in today
+                await message.add_reaction('✅')
     
     await bot.process_commands(message)
 
@@ -371,6 +572,159 @@ async def mylatest(ctx):
         await ctx.send(response)
     else:
         await ctx.send("No PRs found for you yet!")
+
+@bot.command()
+async def progress(ctx):
+    """Show your overall strength improvement"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # Get all exercises with 2+ PRs
+    c.execute('''
+        SELECT exercise, 
+               MIN(estimated_1rm) as first_1rm,
+               MAX(estimated_1rm) as current_1rm,
+               COUNT(*) as pr_count,
+               MIN(timestamp) as first_date,
+               MAX(timestamp) as latest_date
+        FROM prs 
+        WHERE user_id = ?
+        GROUP BY exercise
+        HAVING COUNT(*) >= 2
+    ''', (str(ctx.author.id),))
+    
+    exercises = c.fetchall()
+    conn.close()
+    
+    if not exercises:
+        await ctx.send("You need at least 2 PRs in an exercise to track progress!")
+        return
+    
+    # Calculate percentage gain for each exercise
+    exercise_gains = []
+    total_percentage = 0
+    
+    for exercise, first_1rm, current_1rm, pr_count, first_date, latest_date in exercises:
+        pct_gain = ((current_1rm - first_1rm) / first_1rm) * 100
+        exercise_gains.append((exercise, pct_gain, pr_count, current_1rm - first_1rm))
+        total_percentage += pct_gain
+    
+    # Calculate average % gain across all exercises
+    avg_gain = total_percentage / len(exercise_gains)
+    
+    # Calculate time span and improvement rate
+    first_pr_date = datetime.fromisoformat(exercises[0][4])
+    latest_pr_date = datetime.fromisoformat(exercises[0][5])
+    
+    # Find earliest and latest across all exercises
+    for ex in exercises:
+        ex_first = datetime.fromisoformat(ex[4])
+        ex_latest = datetime.fromisoformat(ex[5])
+        if ex_first < first_pr_date:
+            first_pr_date = ex_first
+        if ex_latest > latest_pr_date:
+            latest_pr_date = ex_latest
+    
+    days_training = (latest_pr_date - first_pr_date).days
+    weeks_training = max(days_training / 7, 0.1)
+    
+    improvement_rate = avg_gain / weeks_training
+    
+    # Build response
+    response = f"**📊 Your Overall Strength Progress**\n\n"
+    response += f"**Overall Improvement: +{avg_gain:.1f}%**\n"
+    response += f"_(Average across {len(exercise_gains)} exercises)_\n\n"
+    response += f"📈 Improvement Rate: **+{improvement_rate:.2f}% per week**\n"
+    response += f"📅 Training Duration: **{days_training} days** ({weeks_training:.1f} weeks)\n\n"
+    response += f"**Exercise Breakdown:**\n"
+    
+    # Sort by percentage gain
+    exercise_gains.sort(key=lambda x: x[1], reverse=True)
+    
+    for exercise, pct_gain, pr_count, abs_gain in exercise_gains[:10]:
+        response += f"• {exercise}: **+{pct_gain:.1f}%** (+{abs_gain:.1f} lbs, {pr_count} PRs)\n"
+    
+    if len(exercise_gains) > 10:
+        response += f"\n_...and {len(exercise_gains) - 10} more exercises_"
+    
+    await ctx.send(response)
+
+@bot.command()
+async def level(ctx):
+    """Check your current level and XP"""
+    total_xp, level = get_user_xp_info(str(ctx.author.id))
+    
+    # Calculate XP progress in current level
+    xp_for_current = 0
+    for i in range(1, level):
+        xp_for_current += 250 + (i * 250)
+    
+    xp_in_level = total_xp - xp_for_current
+    xp_needed_for_next = get_xp_for_next_level(level)
+    progress_pct = (xp_in_level / xp_needed_for_next) * 100
+    
+    # Create progress bar
+    bar_length = 20
+    filled = int((progress_pct / 100) * bar_length)
+    bar = '█' * filled + '░' * (bar_length - filled)
+    
+    # Get PR count
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM prs WHERE user_id = ?', (str(ctx.author.id),))
+    pr_count = c.fetchone()[0]
+    conn.close()
+    
+    response = f"⚔️ **Level {level}**\n\n"
+    response += f"**XP:** {xp_in_level:,} / {xp_needed_for_next:,} ({progress_pct:.1f}%)\n"
+    response += f"[{bar}]\n\n"
+    response += f"**Total XP:** {total_xp:,}\n"
+    response += f"**Lifetime PRs:** {pr_count}\n"
+    response += f"**Next Level:** {level + 1} (need {xp_needed_for_next - xp_in_level:,} more XP)\n"
+    
+    await ctx.send(response)
+
+@bot.command()
+async def leaderboard(ctx, board_type: str = "level"):
+    """Show leaderboards - !leaderboard level or !leaderboard xp"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    if board_type.lower() == "level":
+        c.execute('''
+            SELECT username, level, total_xp
+            FROM user_xp
+            ORDER BY level DESC, total_xp DESC
+            LIMIT 10
+        ''')
+        title = "🏆 Top 10 Levels"
+    else:
+        c.execute('''
+            SELECT username, total_xp, level
+            FROM user_xp
+            ORDER BY total_xp DESC
+            LIMIT 10
+        ''')
+        title = "🏆 Top 10 Total XP"
+    
+    results = c.fetchall()
+    conn.close()
+    
+    if not results:
+        await ctx.send("No one has earned XP yet!")
+        return
+    
+    response = f"**{title}**\n\n"
+    
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (username, primary, secondary) in enumerate(results, 1):
+        medal = medals[i-1] if i <= 3 else f"#{i}"
+        if board_type.lower() == "level":
+            response += f"{medal} **{username}** - Level {primary} ({secondary:,} XP)\n"
+        else:
+            response += f"{medal} **{username}** - {primary:,} XP (Level {secondary})\n"
+    
+    await ctx.send(response)
 
 if __name__ == '__main__':
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
