@@ -29,7 +29,10 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Database setup
 DB_NAME = '/data/pr_tracker.db'
-
+# Channel IDs
+PR_CHANNEL_ID = '1459000944028028970'
+LOGS_CHANNEL_ID = '1450903499075354756'
+CORE_FOODS_CHANNEL_ID = '1459000944028028970'
 def init_db():
     """Initialize the database with required tables"""
     conn = sqlite3.connect(DB_NAME)
