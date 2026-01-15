@@ -29,10 +29,12 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Database setup
 DB_NAME = '/data/pr_tracker.db'
+
 # Channel IDs
 PR_CHANNEL_ID = '1459000944028028970'
 LOGS_CHANNEL_ID = '1450903499075354756'
 CORE_FOODS_CHANNEL_ID = '1459000944028028970'
+
 def init_db():
     """Initialize the database with required tables"""
     conn = sqlite3.connect(DB_NAME)
@@ -53,6 +55,38 @@ def init_db():
         )
     ''')
     
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_xp (
+            user_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            total_xp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1,
+            last_updated TEXT NOT NULL
+        )
+    ''')
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS weekly_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            xp_awarded INTEGER NOT NULL
+        )
+    ''')
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS core_foods_checkins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            xp_awarded INTEGER NOT NULL,
+            UNIQUE(user_id, date)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -61,9 +95,9 @@ def calculate_1rm(weight, reps):
     return (weight * reps * 0.0333) + weight
 
 def calculate_level(total_xp):
-    """Calculate level based on total XP. Each level requires 250 + (level * 250) XP"""
+    """Calculate level based on total XP"""
     level = 1
-    xp_needed = 500  # Level 1 -> 2 requires 500 XP
+    xp_needed = 500
     
     while total_xp >= xp_needed:
         total_xp -= xp_needed
@@ -81,7 +115,6 @@ def add_xp(user_id, username, xp_amount, reason=""):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Get or create user XP record
     c.execute('SELECT total_xp, level FROM user_xp WHERE user_id = ?', (user_id,))
     result = c.fetchone()
     
@@ -94,7 +127,6 @@ def add_xp(user_id, username, xp_amount, reason=""):
     
     new_level = calculate_level(new_xp)
     
-    # Update or insert user XP
     timestamp = datetime.utcnow().isoformat()
     c.execute('''
         INSERT OR REPLACE INTO user_xp (user_id, username, total_xp, level, last_updated)
@@ -120,11 +152,10 @@ def get_user_xp_info(user_id):
     return 0, 1
 
 def can_award_weekly_log_xp(user_id):
-    """Check if user can receive weekly log XP (once per 6 days)"""
+    """Check if user can receive weekly log XP"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Get most recent weekly log
     c.execute('''
         SELECT timestamp FROM weekly_logs 
         WHERE user_id = ? 
@@ -141,7 +172,6 @@ def can_award_weekly_log_xp(user_id):
     last_log_time = datetime.fromisoformat(result[0])
     time_since_last = datetime.utcnow() - last_log_time
     
-    # Must wait 6 days between weekly logs
     return time_since_last.days >= 6
 
 def record_weekly_log(user_id, message_id, xp_awarded):
@@ -191,7 +221,6 @@ def record_core_foods_checkin(user_id, message_id, xp_awarded):
         conn.commit()
         success = True
     except sqlite3.IntegrityError:
-        # Already checked in today
         success = False
     
     conn.close()
@@ -201,7 +230,6 @@ def normalize_exercise_name(exercise):
     """Normalize exercise names to standardize variations"""
     exercise = exercise.lower().strip()
     
-    # Remove trailing 's' to handle plurals
     words = exercise.split()
     normalized_words = []
     
@@ -213,34 +241,19 @@ def normalize_exercise_name(exercise):
     
     exercise = ' '.join(normalized_words)
     
-    # Standardize arm variations
     exercise = re.sub(r'\b(1|one|single)\s+arm\b', 'single arm', exercise)
-    
-    # Standardize grip variations
     exercise = re.sub(r'\b(uh|underhand\s+grip)\b', 'underhand', exercise)
-    
-    # Standardize equipment
     exercise = re.sub(r'\bdb\b', 'dumbbell', exercise)
     exercise = re.sub(r'\bbb\b', 'barbell', exercise)
-    
-    # Standardize fly variations
     exercise = re.sub(r'\bflye?\b', 'fly', exercise)
-    
-    # Standardize raise variations
     exercise = re.sub(r'\blateral\b', 'lateral raise', exercise)
-    
-    # Standardize rear delt fly
     exercise = re.sub(r'\brdf\b', 'rear delt fly', exercise)
-    
-    # Standardize supported
     exercise = re.sub(r'\bsupp\b', 'supported', exercise)
     
-    # Handle extensions - only convert to "tricep extension" if NOT preceded by leg/back/reverse/hyper/hip
     if 'extension' in exercise:
         if not re.search(r'\b(leg|back|reverse|hyper|hip)\s+extension', exercise):
             exercise = re.sub(r'\bextension\b', 'tricep extension', exercise)
     
-    # Clean up extra spaces
     exercise = re.sub(r'\s+', ' ', exercise).strip()
     
     return exercise
@@ -252,17 +265,14 @@ def parse_single_pr(text):
     if not text:
         return None
     
-    # Handle bodyweight notation
     text = re.sub(r'\bbw\b', '0', text, flags=re.IGNORECASE)
     text = re.sub(r'\bbodyweight\b', '0', text, flags=re.IGNORECASE)
     
-    # Remove common filler words
     text = re.sub(r'\b(pr|new pr|hit|got|did|at|for|with|just|finally|crushed)\b', ' ', text)
     text = re.sub(r'\b(reps?|rep|repetitions?)\b', '', text)
     text = re.sub(r'\b(lbs?|pounds?|kgs?|kilos?)\b', '', text)
     text = re.sub(r'\s+', ' ', text).strip()
     
-    # Define patterns
     p1 = r'^(\w+)\s+([\d.]+)\s*[/*x]\s*(\d+)$'
     p2 = r'^(.+?)\s+([\d.]+)\s*[/*x]\s*(\d+)$'
     p3 = r'^(.+?)\s+([\d.]+)\s*-\s*(\d+)$'
@@ -286,12 +296,10 @@ def parse_single_pr(text):
                 weight = float(groups[1])
                 reps = int(groups[2])
             
-            # Normalize exercise name
             exercise = re.sub(r'[^\w\s]', '', exercise)
             exercise = re.sub(r'\s+', ' ', exercise).strip()
             exercise = normalize_exercise_name(exercise)
             
-            # Sanity checks
             if exercise and weight >= 0 and reps > 0 and reps < 1000:
                 return (exercise, weight, reps)
     
@@ -316,14 +324,10 @@ def parse_all_prs(message_content):
     return prs
 
 def get_canonical_exercise_name(exercise):
-    """
-    Match exercise name to existing exercises in database using fuzzy matching.
-    Returns the most common spelling if a close match is found, otherwise returns the input.
-    """
+    """Match exercise name to existing exercises using fuzzy matching"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Get all unique exercise names with their counts
     c.execute('''
         SELECT exercise, COUNT(*) as count 
         FROM prs 
@@ -337,14 +341,10 @@ def get_canonical_exercise_name(exercise):
     if not existing_exercises:
         return exercise
     
-    # Create a list of just the exercise names
     exercise_names = [ex[0] for ex in existing_exercises]
     
-    # Find the best match using fuzzy matching
     best_match = process.extractOne(exercise, exercise_names, scorer=fuzz.ratio)
     
-    # If match is 85% or better, use the canonical name
-    # Otherwise, use the input as-is (it's a new exercise)
     if best_match and best_match[1] >= 85:
         return best_match[0]
     
@@ -352,8 +352,6 @@ def get_canonical_exercise_name(exercise):
 
 def store_pr(user_id, username, exercise, weight, reps, estimated_1rm, message_id, channel_id):
     """Store a PR entry in the database"""
-    
-    # Use fuzzy matching to find canonical exercise name
     exercise = get_canonical_exercise_name(exercise)
     
     conn = sqlite3.connect(DB_NAME)
@@ -394,16 +392,13 @@ async def on_message(message):
     
     channel_id = str(message.channel.id)
     
-    # Handle PR channel (also handles core foods in same channel)
     if channel_id == PR_CHANNEL_ID:
-        # Check if this is a core foods check-in first
         content_lower = message.content.lower()
         core_foods_keywords = ['core foods', 'core', 'food', 'ate', 'eating', 'meal', 'diet', 'nutrition', 'check in', 'checkin']
         
         is_core_foods = any(keyword in content_lower for keyword in core_foods_keywords)
         
         if is_core_foods:
-            # Handle as core foods check-in
             if can_award_core_foods_xp(str(message.author.id)):
                 xp_earned = 200
                 
@@ -420,10 +415,8 @@ async def on_message(message):
                     await message.add_reaction('🍎')
                     await message.add_reaction('✅')
             else:
-                # Already checked in today
                 await message.add_reaction('✅')
         else:
-            # Handle as PR
             parsed_prs = parse_all_prs(message.content)
             
             if parsed_prs:
@@ -446,7 +439,6 @@ async def on_message(message):
                     logged_count += 1
                     print(f'Logged PR: {message.author.name} - {exercise} {weight}/{reps} (Est. 1RM: {estimated_1rm:.1f})')
                 
-                # Award XP for PRs (100 XP each) - silently
                 xp_earned = logged_count * 100
                 add_xp(
                     str(message.author.id),
@@ -455,22 +447,17 @@ async def on_message(message):
                     f"{logged_count} PR(s)"
                 )
                 
-                # React to confirm
                 if logged_count == 1:
                     await message.add_reaction('💪')
                 elif logged_count > 1:
                     await message.add_reaction('💪')
                     await message.add_reaction('🔥')
     
-    # Handle weekly logs channel
     elif channel_id == LOGS_CHANNEL_ID:
-        # Check if message is long enough (300+ characters)
         if len(message.content) >= 300:
             if can_award_weekly_log_xp(str(message.author.id)):
-                # Award 800 XP for weekly log
                 xp_earned = 800
                 
-                # Bonus XP if message includes attachments (photos)
                 if message.attachments:
                     xp_earned += 50
                 
@@ -486,7 +473,6 @@ async def on_message(message):
                 await message.add_reaction('📝')
                 await message.add_reaction('✅')
             else:
-                # Too soon for another weekly log
                 await message.add_reaction('⏰')
     
     await bot.process_commands(message)
@@ -496,8 +482,6 @@ async def on_message_edit(before, after):
     """Handle edited messages in the PR channel"""
     if after.author.bot:
         return
-    
-    PR_CHANNEL_ID = '1459000944028028970'
     
     if str(after.channel.id) != PR_CHANNEL_ID:
         return
@@ -581,7 +565,6 @@ async def progress(ctx):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
-    # Get all exercises with 2+ PRs
     c.execute('''
         SELECT exercise, 
                MIN(estimated_1rm) as first_1rm,
@@ -602,7 +585,6 @@ async def progress(ctx):
         await ctx.send("You need at least 2 PRs in an exercise to track progress!")
         return
     
-    # Calculate percentage gain for each exercise
     exercise_gains = []
     total_percentage = 0
     
@@ -611,14 +593,11 @@ async def progress(ctx):
         exercise_gains.append((exercise, pct_gain, pr_count, current_1rm - first_1rm))
         total_percentage += pct_gain
     
-    # Calculate average % gain across all exercises
     avg_gain = total_percentage / len(exercise_gains)
     
-    # Calculate time span and improvement rate
     first_pr_date = datetime.fromisoformat(exercises[0][4])
     latest_pr_date = datetime.fromisoformat(exercises[0][5])
     
-    # Find earliest and latest across all exercises
     for ex in exercises:
         ex_first = datetime.fromisoformat(ex[4])
         ex_latest = datetime.fromisoformat(ex[5])
@@ -632,7 +611,6 @@ async def progress(ctx):
     
     improvement_rate = avg_gain / weeks_training
     
-    # Build response
     response = f"**📊 Your Overall Strength Progress**\n\n"
     response += f"**Overall Improvement: +{avg_gain:.1f}%**\n"
     response += f"_(Average across {len(exercise_gains)} exercises)_\n\n"
@@ -640,7 +618,6 @@ async def progress(ctx):
     response += f"📅 Training Duration: **{days_training} days** ({weeks_training:.1f} weeks)\n\n"
     response += f"**Exercise Breakdown:**\n"
     
-    # Sort by percentage gain
     exercise_gains.sort(key=lambda x: x[1], reverse=True)
     
     for exercise, pct_gain, pr_count, abs_gain in exercise_gains[:10]:
@@ -656,7 +633,6 @@ async def level(ctx):
     """Check your current level and XP"""
     total_xp, level = get_user_xp_info(str(ctx.author.id))
     
-    # Calculate XP progress in current level
     xp_for_current = 0
     for i in range(1, level):
         xp_for_current += 250 + (i * 250)
@@ -665,12 +641,10 @@ async def level(ctx):
     xp_needed_for_next = get_xp_for_next_level(level)
     progress_pct = (xp_in_level / xp_needed_for_next) * 100
     
-    # Create progress bar
     bar_length = 20
     filled = int((progress_pct / 100) * bar_length)
     bar = '█' * filled + '░' * (bar_length - filled)
     
-    # Get PR count
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('SELECT COUNT(*) FROM prs WHERE user_id = ?', (str(ctx.author.id),))
@@ -688,7 +662,7 @@ async def level(ctx):
 
 @bot.command()
 async def leaderboard(ctx, board_type: str = "level"):
-    """Show leaderboards - !leaderboard level or !leaderboard xp"""
+    """Show leaderboards"""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
