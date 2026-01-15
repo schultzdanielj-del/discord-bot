@@ -6,6 +6,7 @@ import re
 import os
 from flask import Flask
 from threading import Thread
+from rapidfuzz import fuzz, process
 
 # Flask app for keep-alive
 app = Flask('')
@@ -174,8 +175,47 @@ def parse_all_prs(message_content):
     
     return prs
 
+def get_canonical_exercise_name(exercise):
+    """
+    Match exercise name to existing exercises in database using fuzzy matching.
+    Returns the most common spelling if a close match is found, otherwise returns the input.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # Get all unique exercise names with their counts
+    c.execute('''
+        SELECT exercise, COUNT(*) as count 
+        FROM prs 
+        GROUP BY exercise 
+        ORDER BY count DESC
+    ''')
+    
+    existing_exercises = c.fetchall()
+    conn.close()
+    
+    if not existing_exercises:
+        return exercise
+    
+    # Create a list of just the exercise names
+    exercise_names = [ex[0] for ex in existing_exercises]
+    
+    # Find the best match using fuzzy matching
+    best_match = process.extractOne(exercise, exercise_names, scorer=fuzz.ratio)
+    
+    # If match is 85% or better, use the canonical name
+    # Otherwise, use the input as-is (it's a new exercise)
+    if best_match and best_match[1] >= 85:
+        return best_match[0]
+    
+    return exercise
+
 def store_pr(user_id, username, exercise, weight, reps, estimated_1rm, message_id, channel_id):
     """Store a PR entry in the database"""
+    
+    # Use fuzzy matching to find canonical exercise name
+    exercise = get_canonical_exercise_name(exercise)
+    
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
