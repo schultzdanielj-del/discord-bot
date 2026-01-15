@@ -391,45 +391,73 @@ async def on_message(message):
     
     channel_id = str(message.channel.id)
     
-    # Handle PR channel
+    # Handle PR channel (also handles core foods in same channel)
     if channel_id == PR_CHANNEL_ID:
-        parsed_prs = parse_all_prs(message.content)
+        # Check if this is a core foods check-in first
+        content_lower = message.content.lower()
+        core_foods_keywords = ['core foods', 'core', 'food', 'ate', 'eating', 'meal', 'diet', 'nutrition', 'check in', 'checkin']
         
-        if parsed_prs:
-            logged_count = 0
-            
-            for exercise, weight, reps in parsed_prs:
-                estimated_1rm = calculate_1rm(weight, reps)
+        is_core_foods = any(keyword in content_lower for keyword in core_foods_keywords)
+        
+        if is_core_foods:
+            # Handle as core foods check-in
+            if can_award_core_foods_xp(str(message.author.id)):
+                xp_earned = 200
                 
-                store_pr(
+                add_xp(
                     str(message.author.id),
                     message.author.name,
-                    exercise,
-                    weight,
-                    reps,
-                    estimated_1rm,
-                    str(message.id),
-                    str(message.channel.id)
+                    xp_earned,
+                    "Core foods check-in"
                 )
                 
-                logged_count += 1
-                print(f'Logged PR: {message.author.name} - {exercise} {weight}/{reps} (Est. 1RM: {estimated_1rm:.1f})')
-            
-            # Award XP for PRs (100 XP each) - silently
-            xp_earned = logged_count * 100
-            add_xp(
-                str(message.author.id),
-                message.author.name,
-                xp_earned,
-                f"{logged_count} PR(s)"
-            )
-            
-            # React to confirm
-            if logged_count == 1:
+                success = record_core_foods_checkin(str(message.author.id), str(message.id), xp_earned)
+                
+                if success:
+                    await message.add_reaction('🍎')
+                    await message.add_reaction('✅')
+            else:
+                # Already checked in today
                 await message.add_reaction('✅')
-            elif logged_count > 1:
-                await message.add_reaction('✅')
-                await message.add_reaction('💪')
+        else:
+            # Handle as PR
+            parsed_prs = parse_all_prs(message.content)
+            
+            if parsed_prs:
+                logged_count = 0
+                
+                for exercise, weight, reps in parsed_prs:
+                    estimated_1rm = calculate_1rm(weight, reps)
+                    
+                    store_pr(
+                        str(message.author.id),
+                        message.author.name,
+                        exercise,
+                        weight,
+                        reps,
+                        estimated_1rm,
+                        str(message.id),
+                        str(message.channel.id)
+                    )
+                    
+                    logged_count += 1
+                    print(f'Logged PR: {message.author.name} - {exercise} {weight}/{reps} (Est. 1RM: {estimated_1rm:.1f})')
+                
+                # Award XP for PRs (100 XP each) - silently
+                xp_earned = logged_count * 100
+                add_xp(
+                    str(message.author.id),
+                    message.author.name,
+                    xp_earned,
+                    f"{logged_count} PR(s)"
+                )
+                
+                # React to confirm
+                if logged_count == 1:
+                    await message.add_reaction('💪')
+                elif logged_count > 1:
+                    await message.add_reaction('💪')
+                    await message.add_reaction('🔥')
     
     # Handle weekly logs channel
     elif channel_id == LOGS_CHANNEL_ID:
@@ -457,35 +485,6 @@ async def on_message(message):
             else:
                 # Too soon for another weekly log
                 await message.add_reaction('⏰')
-    
-    # Handle core foods channel
-    elif channel_id == CORE_FOODS_CHANNEL_ID:
-        # Check if this message might be a core foods check-in
-        # Look for keywords to differentiate from PRs
-        content_lower = message.content.lower()
-        core_foods_keywords = ['core foods', 'core', 'food', 'ate', 'eating', 'meal', 'diet', 'nutrition', 'check in', 'checkin']
-        
-        # If message contains core foods keywords, treat as check-in
-        if any(keyword in content_lower for keyword in core_foods_keywords):
-            if can_award_core_foods_xp(str(message.author.id)):
-                # Award 200 XP for daily core foods check-in
-                xp_earned = 200
-                
-                add_xp(
-                    str(message.author.id),
-                    message.author.name,
-                    xp_earned,
-                    "Core foods check-in"
-                )
-                
-                success = record_core_foods_checkin(str(message.author.id), str(message.id), xp_earned)
-                
-                if success:
-                    await message.add_reaction('🍎')
-                    await message.add_reaction('✅')
-            else:
-                # Already checked in today
-                await message.add_reaction('✅')
     
     await bot.process_commands(message)
 
