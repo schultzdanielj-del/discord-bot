@@ -7,6 +7,7 @@ import os
 from flask import Flask
 from threading import Thread
 from rapidfuzz import fuzz, process
+import io
 
 # Flask app for keep-alive
 app = Flask('')
@@ -883,6 +884,149 @@ async def _generate_content_summary(ctx, days, period_name):
     except discord.Forbidden:
         # If DMs are disabled, send in channel
         await ctx.send(summary)
+
+@bot.command()
+async def weekly_raw(ctx):
+    """Export ALL raw Discord activity from past 7 days"""
+    await _export_raw_activity(ctx, days=7, period_name="Week")
+
+@bot.command()
+async def monthly_raw(ctx):
+    """Export ALL raw Discord activity from past 30 days"""
+    await _export_raw_activity(ctx, days=30, period_name="Month")
+
+async def _export_raw_activity(ctx, days, period_name):
+    """Export complete raw Discord activity for Claude to analyze"""
+    
+    # Calculate date range
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=days)
+    
+    # Get the actual Discord channels
+    pr_channel = bot.get_channel(int(PR_CHANNEL_ID))
+    logs_channel = bot.get_channel(int(LOGS_CHANNEL_ID))
+    
+    # Find general channel
+    general_channel = None
+    for channel in ctx.guild.text_channels:
+        if 'general' in channel.name.lower():
+            general_channel = channel
+            break
+    
+    output = f"📊 **COMPLETE RAW ACTIVITY EXPORT - PAST {days} DAYS**\n"
+    output += f"**Period:** {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}\n"
+    output += f"=" * 80 + "\n\n"
+    
+    # ===== PR CHANNEL MESSAGES =====
+    if pr_channel:
+        output += f"🏋️ **#PRS CHANNEL - ALL MESSAGES**\n"
+        output += "=" * 80 + "\n\n"
+        
+        pr_messages = []
+        async for message in pr_channel.history(limit=500, after=start_date):
+            if not message.author.bot:
+                pr_messages.append(message)
+        
+        pr_messages.reverse()  # chronological order
+        
+        for msg in pr_messages:
+            output += f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.name}:\n"
+            output += f"{msg.content}\n"
+            if msg.reactions:
+                reactions = " ".join([f"{r.emoji}x{r.count}" for r in msg.reactions])
+                output += f"Reactions: {reactions}\n"
+            output += "\n"
+        
+        output += f"\nTotal PR channel messages: {len(pr_messages)}\n\n"
+    
+    # ===== WEEKLY LOGS CHANNEL =====
+    if logs_channel:
+        output += f"📝 **#WEEKLY-LOGS CHANNEL - ALL MESSAGES**\n"
+        output += "=" * 80 + "\n\n"
+        
+        log_messages = []
+        async for message in logs_channel.history(limit=200, after=start_date):
+            if not message.author.bot:
+                log_messages.append(message)
+        
+        log_messages.reverse()
+        
+        for msg in log_messages:
+            output += f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.name}:\n"
+            output += f"{msg.content}\n"
+            if msg.attachments:
+                output += f"Attachments: {len(msg.attachments)} file(s)\n"
+            if msg.reactions:
+                reactions = " ".join([f"{r.emoji}x{r.count}" for r in msg.reactions])
+                output += f"Reactions: {reactions}\n"
+            output += "\n"
+        
+        output += f"\nTotal weekly log messages: {len(log_messages)}\n\n"
+    
+    # ===== GENERAL CHANNEL (if exists) =====
+    if general_channel:
+        output += f"💬 **#GENERAL CHANNEL - ALL MESSAGES**\n"
+        output += "=" * 80 + "\n\n"
+        
+        general_messages = []
+        async for message in general_channel.history(limit=500, after=start_date):
+            if not message.author.bot:
+                general_messages.append(message)
+        
+        general_messages.reverse()
+        
+        for msg in general_messages:
+            output += f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.name}:\n"
+            output += f"{msg.content}\n"
+            if msg.reactions:
+                reactions = " ".join([f"{r.emoji}x{r.count}" for r in msg.reactions])
+                output += f"Reactions: {reactions}\n"
+            output += "\n"
+        
+        output += f"\nTotal general messages: {len(general_messages)}\n\n"
+    
+    # ===== DATABASE STATS =====
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    
+    # PR stats
+    c.execute('''
+        SELECT COUNT(*), COUNT(DISTINCT user_id), COUNT(DISTINCT exercise)
+        FROM prs
+        WHERE timestamp >= ? AND timestamp <= ?
+    ''', (start_iso, end_iso))
+    pr_count, unique_users_prs, unique_exercises = c.fetchone()
+    
+    # XP stats
+    c.execute('SELECT username, total_xp, level FROM user_xp ORDER BY total_xp DESC')
+    xp_stats = c.fetchall()
+    
+    conn.close()
+    
+    output += f"📈 **DATABASE STATISTICS**\n"
+    output += "=" * 80 + "\n\n"
+    output += f"Total PRs logged: {pr_count}\n"
+    output += f"Unique members with PRs: {unique_users_prs}\n"
+    output += f"Unique exercises: {unique_exercises}\n\n"
+    
+    output += f"**Current XP Leaderboard:**\n"
+    for username, xp, level in xp_stats:
+        output += f"- {username}: Level {level} ({xp:,} XP)\n"
+    
+    output += "\n" + "=" * 80 + "\n"
+    output += f"**END OF RAW DATA EXPORT**\n"
+    output += f"Total characters: {len(output):,}\n"
+    
+    # Send as text file
+    file = discord.File(io.BytesIO(output.encode('utf-8')), filename=f'discord_raw_export_{period_name.lower()}.txt')
+    try:
+        await ctx.author.send(file=file)
+        await ctx.send("✅ Raw data export sent to your DMs as a file!")
+    except discord.Forbidden:
+        await ctx.send(file=file)
 
 if __name__ == '__main__':
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
