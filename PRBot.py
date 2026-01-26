@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 import os
 from flask import Flask
@@ -701,6 +701,188 @@ async def leaderboard(ctx, board_type: str = "level"):
             response += f"{medal} **{username}** - {primary:,} XP (Level {secondary})\n"
     
     await ctx.send(response)
+
+@bot.command()
+async def weekly_content(ctx):
+    """Generate weekly content summary for social media"""
+    await _generate_content_summary(ctx, days=7, period_name="Week")
+
+@bot.command()
+async def monthly_content(ctx):
+    """Generate monthly content summary for social media"""
+    await _generate_content_summary(ctx, days=30, period_name="Month")
+
+async def _generate_content_summary(ctx, days, period_name):
+    """Generate content summary for specified time period"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # Calculate date range
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=days)
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+    
+    # Get all PRs in period
+    c.execute('''
+        SELECT user_id, username, exercise, weight, reps, estimated_1rm, timestamp
+        FROM prs
+        WHERE timestamp >= ? AND timestamp <= ?
+        ORDER BY timestamp DESC
+    ''', (start_iso, end_iso))
+    all_prs = c.fetchall()
+    
+    # Get weekly logs in period
+    c.execute('''
+        SELECT user_id, COUNT(*) as log_count
+        FROM weekly_logs
+        WHERE timestamp >= ? AND timestamp <= ?
+        GROUP BY user_id
+    ''', (start_iso, end_iso))
+    weekly_logs = dict(c.fetchall())
+    
+    # Get core foods check-ins in period
+    c.execute('''
+        SELECT user_id, COUNT(*) as checkin_count
+        FROM core_foods_checkins
+        WHERE timestamp >= ? AND timestamp <= ?
+        GROUP BY user_id
+    ''', (start_iso, end_iso))
+    core_foods = dict(c.fetchall())
+    
+    # Get all users for total member count
+    c.execute('SELECT user_id, username, total_xp, level FROM user_xp ORDER BY level DESC')
+    all_users = c.fetchall()
+    
+    conn.close()
+    
+    if not all_prs and not weekly_logs and not core_foods:
+        await ctx.send(f"No activity found in the past {days} days!")
+        return
+    
+    # Process PRs by user
+    user_prs = {}
+    total_pr_count = 0
+    exercise_prs = {}
+    
+    for user_id, username, exercise, weight, reps, est_1rm, timestamp in all_prs:
+        if user_id not in user_prs:
+            user_prs[user_id] = {
+                'username': username,
+                'prs': [],
+                'pr_count': 0
+            }
+        user_prs[user_id]['prs'].append({
+            'exercise': exercise,
+            'weight': weight,
+            'reps': reps,
+            'est_1rm': est_1rm,
+            'timestamp': timestamp
+        })
+        user_prs[user_id]['pr_count'] += 1
+        total_pr_count += 1
+        
+        # Track PRs by exercise
+        if exercise not in exercise_prs:
+            exercise_prs[exercise] = 0
+        exercise_prs[exercise] += 1
+    
+    # Find standout moments
+    standout_moments = []
+    
+    for user_id, data in user_prs.items():
+        # Check for PR streaks
+        consecutive_days = {}
+        for pr in data['prs']:
+            day = pr['timestamp'][:10]
+            if day not in consecutive_days:
+                consecutive_days[day] = 0
+            consecutive_days[day] += 1
+        
+        if consecutive_days:
+            max_in_day = max(consecutive_days.values())
+            if max_in_day >= 5:
+                standout_moments.append(f"{data['username']} hit {max_in_day} PRs in a single day")
+        
+        # Check for big improvements in single exercise
+        exercise_progress = {}
+        for pr in sorted(data['prs'], key=lambda x: x['timestamp']):
+            ex = pr['exercise']
+            if ex not in exercise_progress:
+                exercise_progress[ex] = {'first': pr['est_1rm'], 'last': pr['est_1rm']}
+            else:
+                exercise_progress[ex]['last'] = pr['est_1rm']
+        
+        for ex, progress in exercise_progress.items():
+            improvement = progress['last'] - progress['first']
+            if improvement >= 20:
+                standout_moments.append(f"{data['username']} added +{improvement:.0f}lbs to {ex}")
+    
+    # Get top users by PR count
+    top_users = sorted(user_prs.items(), key=lambda x: x[1]['pr_count'], reverse=True)[:5]
+    
+    # Count active members
+    active_members = len(user_prs)
+    total_members = len(all_users)
+    
+    # Format the summary
+    summary = f"📊 **{period_name.upper()} SUMMARY ({start_date.strftime('%b %d')} - {end_date.strftime('%b %d')})**\n\n"
+    
+    summary += f"👥 **ACTIVE MEMBERS:** {active_members}/{total_members} ({(active_members/max(total_members,1)*100):.0f}%)\n\n"
+    
+    summary += f"💪 **PRS THIS {period_name.upper()}:** {total_pr_count} total\n"
+    for user_id, data in top_users:
+        username = data['username']
+        pr_count = data['pr_count']
+        
+        # Get sample PRs
+        sample_prs = data['prs'][:3]
+        pr_samples = ", ".join([f"{pr['exercise']} +{pr['weight']:.0f}lbs" for pr in sample_prs])
+        
+        summary += f"- {username}: {pr_count} PRs ({pr_samples}...)\n"
+    
+    summary += f"\n📝 **WEEKLY LOGS:** {sum(weekly_logs.values())} submitted\n"
+    if weekly_logs:
+        for user_id, count in sorted(weekly_logs.items(), key=lambda x: x[1], reverse=True):
+            username = user_prs.get(user_id, {}).get('username', 'Unknown')
+            summary += f"- {username}: {count} log(s)\n"
+    
+    summary += f"\n🍽️ **CORE FOODS CHECK-INS:**\n"
+    if core_foods:
+        for user_id, count in sorted(core_foods.items(), key=lambda x: x[1], reverse=True):
+            username = user_prs.get(user_id, {}).get('username', 'Unknown')
+            summary += f"- {username}: {count}/{days} days ({(count/days*100):.0f}%)\n"
+    else:
+        summary += "- No check-ins this period\n"
+    
+    summary += f"\n🏆 **TOP XP EARNERS (ESTIMATED):**\n"
+    for i, (user_id, data) in enumerate(top_users, 1):
+        # Estimate XP: PRs * 100 + logs * 800 + core foods * 200
+        est_xp = (data['pr_count'] * 100) + (weekly_logs.get(user_id, 0) * 800) + (core_foods.get(user_id, 0) * 200)
+        summary += f"{i}. {data['username']}: ~{est_xp:,} XP\n"
+    
+    if standout_moments:
+        summary += f"\n🔥 **STANDOUT MOMENTS:**\n"
+        for moment in standout_moments[:5]:
+            summary += f"- {moment}\n"
+    
+    # Top exercises this period
+    if exercise_prs:
+        top_exercises = sorted(exercise_prs.items(), key=lambda x: x[1], reverse=True)[:5]
+        summary += f"\n💥 **MOST POPULAR EXERCISES:**\n"
+        for exercise, count in top_exercises:
+            summary += f"- {exercise}: {count} PRs\n"
+    
+    summary += f"\n---\n\n"
+    summary += f"**PASTE THIS INTO CLAUDE WITH YOUR CONTENT GENERATION PROMPT**\n"
+    
+    # Send via DM
+    try:
+        await ctx.author.send(summary)
+        await ctx.send("✅ Content summary sent to your DMs!")
+    except discord.Forbidden:
+        # If DMs are disabled, send in channel
+        await ctx.send(summary)
 
 if __name__ == '__main__':
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
