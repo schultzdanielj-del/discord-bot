@@ -1028,6 +1028,34 @@ async def _export_raw_activity(ctx, days, period_name):
     except discord.Forbidden:
         await ctx.send(file=file)
 
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def export_data(ctx):
+    """Export all database data as JSON for migration"""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    # Export PRs
+    c.execute('SELECT user_id, username, exercise, weight, reps, estimated_1rm, timestamp FROM prs')
+    prs = [{"user_id": r[0], "username": r[1], "exercise": r[2], "weight": r[3], "reps": r[4], "estimated_1rm": r[5], "timestamp": r[6]} for r in c.fetchall()]
+    
+    # Export XP
+    c.execute('SELECT user_id, username, total_xp, level FROM user_xp')
+    xp = [{"user_id": r[0], "username": r[1], "total_xp": r[2], "level": r[3]} for r in c.fetchall()]
+    
+    conn.close()
+    
+    data = {"prs": prs, "xp": xp}
+    
+    # Send as file
+    import json
+    file_content = json.dumps(data, indent=2)
+    file = discord.File(io.BytesIO(file_content.encode('utf-8')), filename='ttm_data_export.json')
+    
+    await ctx.author.send(f"Exported {len(prs)} PRs and {len(xp)} XP records")
+    await ctx.author.send(file=file)
+    await ctx.send("✅ Data exported to your DMs!")
+
 if __name__ == '__main__':
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
     
