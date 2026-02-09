@@ -574,8 +574,41 @@ async def mylatest(ctx):
 
 @bot.command(name='progress')
 async def progress_command(ctx):
-    """Shows progress for each exercise (first PR vs latest PR)"""
+    """Shows progress for each exercise (minimum PR vs maximum PR)"""
     user_id = str(ctx.author.id)
+    
+    # Local copy of normalization function
+    def normalize_exercise_name_local(exercise):
+        """Normalize exercise names to standardize variations"""
+        exercise = exercise.lower().strip()
+        
+        words = exercise.split()
+        normalized_words = []
+        
+        for word in words:
+            if len(word) > 2 and word.endswith('s') and not word.endswith('ss'):
+                normalized_words.append(word[:-1])
+            else:
+                normalized_words.append(word)
+        
+        exercise = ' '.join(normalized_words)
+        
+        exercise = re.sub(r'\b(1|one|single)\s+arm\b', 'single arm', exercise)
+        exercise = re.sub(r'\b(uh|underhand\s+grip)\b', 'underhand', exercise)
+        exercise = re.sub(r'\bdb\b', 'dumbbell', exercise)
+        exercise = re.sub(r'\bbb\b', 'barbell', exercise)
+        exercise = re.sub(r'\bflye?\b', 'fly', exercise)
+        exercise = re.sub(r'\blateral\b', 'lateral raise', exercise)
+        exercise = re.sub(r'\brdf\b', 'rear delt fly', exercise)
+        exercise = re.sub(r'\bsupp\b', 'supported', exercise)
+        
+        if 'extension' in exercise:
+            if not re.search(r'\b(leg|back|reverse|hyper|hip)\s+extension', exercise):
+                exercise = re.sub(r'\bextension\b', 'tricep extension', exercise)
+        
+        exercise = re.sub(r'\s+', ' ', exercise).strip()
+        
+        return exercise
     
     try:
         # Fetch all PRs for this user from API
@@ -593,13 +626,13 @@ async def progress_command(ctx):
             await ctx.send("No PRs found! Post your first PR to get started. 💪")
             return
         
-        # Group PRs by exercise
+        # Group PRs by NORMALIZED exercise name
         exercise_prs = {}
         for pr in prs:
-            exercise = pr['exercise']
-            if exercise not in exercise_prs:
-                exercise_prs[exercise] = []
-            exercise_prs[exercise].append(pr)
+            normalized_exercise = normalize_exercise_name_local(pr['exercise'])  # <-- KEY FIX
+            if normalized_exercise not in exercise_prs:
+                exercise_prs[normalized_exercise] = []
+            exercise_prs[normalized_exercise].append(pr)
         
         # Build progress report
         lines = [f"**Progress Report for {ctx.author.display_name}**\n"]
@@ -607,60 +640,55 @@ async def progress_command(ctx):
         for exercise in sorted(exercise_prs.keys()):
             prs_list = exercise_prs[exercise]
             
-            # Sort by timestamp to get first and latest
-            prs_list.sort(key=lambda x: x['timestamp'])
-            first_pr = prs_list[0]
-            latest_pr = prs_list[-1]
-            
-            # Check if it's a bodyweight exercise (weight = 0)
-            is_bodyweight = first_pr['weight'] == 0 or latest_pr['weight'] == 0
+            # Check if it's a bodyweight exercise
+            is_bodyweight = all(pr['weight'] == 0 for pr in prs_list)
             
             if is_bodyweight:
-                # For bodyweight: compare reps only
-                first_reps = first_pr['reps']
-                latest_reps = latest_pr['reps']
+                # For bodyweight: find min and max reps
+                min_pr = min(prs_list, key=lambda x: x['reps'])
+                max_pr = max(prs_list, key=lambda x: x['reps'])
                 
-                if first_reps > 0:
-                    rep_gain = latest_reps - first_reps
-                    pct_gain = ((latest_reps - first_reps) / first_reps) * 100
+                min_reps = min_pr['reps']
+                max_reps = max_pr['reps']
+                
+                if min_reps != max_reps and min_reps > 0:
+                    rep_gain = max_reps - min_reps
+                    pct_gain = ((max_reps - min_reps) / min_reps) * 100
                     
                     lines.append(
-                        f"**{exercise}**: {first_reps} reps → {latest_reps} reps "
+                        f"**{exercise}**: {min_reps} reps → {max_reps} reps "
                         f"({rep_gain:+.0f} reps, {pct_gain:+.1f}%)"
                     )
                 else:
-                    lines.append(f"**{exercise}**: {latest_reps} reps")
+                    lines.append(f"**{exercise}**: {max_reps} reps")
             
             else:
-                # For weighted exercises: calculate 1RM
-                def calc_1rm(weight, reps):
-                    if reps == 1:
-                        return weight
-                    return weight * (1 + reps / 30)
+                # For weighted exercises: find min and max e1RM
+                min_pr = min(prs_list, key=lambda x: x['estimated_1rm'])
+                max_pr = max(prs_list, key=lambda x: x['estimated_1rm'])
                 
-                first_1rm = calc_1rm(first_pr['weight'], first_pr['reps'])
-                latest_1rm = calc_1rm(latest_pr['weight'], latest_pr['reps'])
+                min_1rm = min_pr['estimated_1rm']
+                max_1rm = max_pr['estimated_1rm']
                 
-                if first_1rm > 0:
-                    rm_gain = latest_1rm - first_1rm
-                    pct_gain = ((latest_1rm - first_1rm) / first_1rm) * 100
+                if min_1rm != max_1rm and min_1rm > 0:
+                    rm_gain = max_1rm - min_1rm
+                    pct_gain = ((max_1rm - min_1rm) / min_1rm) * 100
                     
                     lines.append(
-                        f"**{exercise}**: {first_1rm:.0f}lb e1RM → {latest_1rm:.0f}lb e1RM "
+                        f"**{exercise}**: {min_1rm:.0f}lb e1RM → {max_1rm:.0f}lb e1RM "
                         f"({rm_gain:+.0f}lb, {pct_gain:+.1f}%)"
                     )
                 else:
-                    lines.append(f"**{exercise}**: {latest_1rm:.0f}lb e1RM")
+                    lines.append(f"**{exercise}**: {max_1rm:.0f}lb e1RM")
             
             # Show PR count for this exercise
             lines.append(f"  └ {len(prs_list)} total PRs\n")
         
-        # Send in chunks if too long (Discord 2000 char limit)
+        # Send in chunks if too long
         message = "\n".join(lines)
         if len(message) <= 2000:
             await ctx.send(message)
         else:
-            # Split into chunks
             chunks = []
             current_chunk = lines[0] + "\n"
             for line in lines[1:]:
