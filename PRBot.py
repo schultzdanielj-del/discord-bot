@@ -362,7 +362,7 @@ async def store_pr(user_id, username, exercise, weight, reps, estimated_1rm, mes
             response = await client.post(
                 f"{API_BASE_URL}/prs",
                 json={
-                    "user_id": user_id,
+                    "user_id": int(user_id),
                     "exercise": exercise,
                     "weight": weight,
                     "reps": reps
