@@ -571,75 +571,113 @@ async def mylatest(ctx):
     else:
         await ctx.send("No PRs found for you yet!")
 
-@bot.command()
-async def progress(ctx):
-    """Show your overall strength improvement"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+@bot.command(name='progress')
+async def progress_command(ctx):
+    """Shows progress for each exercise (first PR vs latest PR)"""
+    user_id = str(ctx.author.id)
     
-    c.execute('''
-        SELECT exercise, 
-               MIN(estimated_1rm) as first_1rm,
-               MAX(estimated_1rm) as current_1rm,
-               COUNT(*) as pr_count,
-               MIN(timestamp) as first_date,
-               MAX(timestamp) as latest_date
-        FROM prs 
-        WHERE user_id = ?
-        GROUP BY exercise
-        HAVING COUNT(*) >= 2
-    ''', (str(ctx.author.id),))
+    try:
+        # Fetch all PRs for this user from API
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f'https://ttm-metrics-api-production.up.railway.app/api/prs/{user_id}'
+            ) as response:
+                if response.status != 200:
+                    await ctx.send(f"❌ Error fetching PRs: {response.status}")
+                    return
+                
+                prs = await response.json()
+        
+        if not prs:
+            await ctx.send("No PRs found! Post your first PR to get started. 💪")
+            return
+        
+        # Group PRs by exercise
+        exercise_prs = {}
+        for pr in prs:
+            exercise = pr['exercise']
+            if exercise not in exercise_prs:
+                exercise_prs[exercise] = []
+            exercise_prs[exercise].append(pr)
+        
+        # Build progress report
+        lines = [f"**Progress Report for {ctx.author.display_name}**\n"]
+        
+        for exercise in sorted(exercise_prs.keys()):
+            prs_list = exercise_prs[exercise]
+            
+            # Sort by timestamp to get first and latest
+            prs_list.sort(key=lambda x: x['timestamp'])
+            first_pr = prs_list[0]
+            latest_pr = prs_list[-1]
+            
+            # Check if it's a bodyweight exercise (weight = 0)
+            is_bodyweight = first_pr['weight'] == 0 or latest_pr['weight'] == 0
+            
+            if is_bodyweight:
+                # For bodyweight: compare reps only
+                first_reps = first_pr['reps']
+                latest_reps = latest_pr['reps']
+                
+                if first_reps > 0:
+                    rep_gain = latest_reps - first_reps
+                    pct_gain = ((latest_reps - first_reps) / first_reps) * 100
+                    
+                    lines.append(
+                        f"**{exercise}**: {first_reps} reps → {latest_reps} reps "
+                        f"({rep_gain:+.0f} reps, {pct_gain:+.1f}%)"
+                    )
+                else:
+                    lines.append(f"**{exercise}**: {latest_reps} reps")
+            
+            else:
+                # For weighted exercises: calculate 1RM
+                def calc_1rm(weight, reps):
+                    if reps == 1:
+                        return weight
+                    return weight * (1 + reps / 30)
+                
+                first_1rm = calc_1rm(first_pr['weight'], first_pr['reps'])
+                latest_1rm = calc_1rm(latest_pr['weight'], latest_pr['reps'])
+                
+                if first_1rm > 0:
+                    rm_gain = latest_1rm - first_1rm
+                    pct_gain = ((latest_1rm - first_1rm) / first_1rm) * 100
+                    
+                    lines.append(
+                        f"**{exercise}**: {first_1rm:.0f}lb e1RM → {latest_1rm:.0f}lb e1RM "
+                        f"({rm_gain:+.0f}lb, {pct_gain:+.1f}%)"
+                    )
+                else:
+                    lines.append(f"**{exercise}**: {latest_1rm:.0f}lb e1RM")
+            
+            # Show PR count for this exercise
+            lines.append(f"  └ {len(prs_list)} total PRs\n")
+        
+        # Send in chunks if too long (Discord 2000 char limit)
+        message = "\n".join(lines)
+        if len(message) <= 2000:
+            await ctx.send(message)
+        else:
+            # Split into chunks
+            chunks = []
+            current_chunk = lines[0] + "\n"
+            for line in lines[1:]:
+                if len(current_chunk) + len(line) + 1 <= 1900:
+                    current_chunk += line + "\n"
+                else:
+                    chunks.append(current_chunk)
+                    current_chunk = line + "\n"
+            chunks.append(current_chunk)
+            
+            for chunk in chunks:
+                await ctx.send(chunk)
     
-    exercises = c.fetchall()
-    conn.close()
-    
-    if not exercises:
-        await ctx.send("You need at least 2 PRs in an exercise to track progress!")
-        return
-    
-    exercise_gains = []
-    total_percentage = 0
-    
-    for exercise, first_1rm, current_1rm, pr_count, first_date, latest_date in exercises:
-        pct_gain = ((current_1rm - first_1rm) / first_1rm) * 100
-        exercise_gains.append((exercise, pct_gain, pr_count, current_1rm - first_1rm))
-        total_percentage += pct_gain
-    
-    avg_gain = total_percentage / len(exercise_gains)
-    
-    first_pr_date = datetime.fromisoformat(exercises[0][4])
-    latest_pr_date = datetime.fromisoformat(exercises[0][5])
-    
-    for ex in exercises:
-        ex_first = datetime.fromisoformat(ex[4])
-        ex_latest = datetime.fromisoformat(ex[5])
-        if ex_first < first_pr_date:
-            first_pr_date = ex_first
-        if ex_latest > latest_pr_date:
-            latest_pr_date = ex_latest
-    
-    days_training = (latest_pr_date - first_pr_date).days
-    weeks_training = max(days_training / 7, 0.1)
-    
-    improvement_rate = avg_gain / weeks_training
-    
-    response = f"**📊 Your Overall Strength Progress**\n\n"
-    response += f"**Overall Improvement: +{avg_gain:.1f}%**\n"
-    response += f"_(Average across {len(exercise_gains)} exercises)_\n\n"
-    response += f"📈 Improvement Rate: **+{improvement_rate:.2f}% per week**\n"
-    response += f"📅 Training Duration: **{days_training} days** ({weeks_training:.1f} weeks)\n\n"
-    response += f"**Exercise Breakdown:**\n"
-    
-    exercise_gains.sort(key=lambda x: x[1], reverse=True)
-    
-    for exercise, pct_gain, pr_count, abs_gain in exercise_gains[:10]:
-        response += f"• {exercise}: **+{pct_gain:.1f}%** (+{abs_gain:.1f} lbs, {pr_count} PRs)\n"
-    
-    if len(exercise_gains) > 10:
-        response += f"\n_...and {len(exercise_gains) - 10} more exercises_"
-    
-    await ctx.send(response)
-
+    except Exception as e:
+        await ctx.send(f"❌ Error generating progress report: {str(e)}")
+        print(f"Progress command error: {e}")
+        import traceback
+        traceback.print_exc()
 @bot.command()
 async def level(ctx):
     """Check your current level and XP"""
