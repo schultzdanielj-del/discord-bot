@@ -375,6 +375,8 @@ async def store_pr(user_id, username, exercise, weight, reps, estimated_1rm, mes
             return True
         except Exception as e:
             print(f'❌ API error storing PR: {e}')
+            if hasattr(e, 'response'):
+                print(f'Response body: {e.response.text}')
             return False
 
 def delete_prs_by_message(message_id):
