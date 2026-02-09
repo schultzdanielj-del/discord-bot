@@ -437,11 +437,13 @@ async def on_message(message):
                 
                 for exercise, weight, reps in parsed_prs:
                     estimated_1rm = calculate_1rm(weight, reps)
+
+                    canonical_exercise = get_canonical_exercise_name(exercise) 
                     
                     await store_pr(
                         str(message.author.id),
                         message.author.name,
-                        exercise,
+                        canonical_exercise,
                         weight,
                         reps,
                         estimated_1rm,
@@ -511,11 +513,13 @@ async def on_message_edit(before, after):
         
         for exercise, weight, reps in parsed_prs:
             estimated_1rm = calculate_1rm(weight, reps)
+
+            canonical_exercise = get_canonical_exercise_name(exercise)
             
             await store_pr(
                 str(after.author.id),
                 after.author.name,
-                exercise,
+               canonical_exercise,
                 weight,
                 reps,
                 estimated_1rm,
