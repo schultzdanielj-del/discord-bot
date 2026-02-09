@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta
 import re
 import os
+import aiohttp
 from flask import Flask
 from threading import Thread
 from rapidfuzz import fuzz, process
