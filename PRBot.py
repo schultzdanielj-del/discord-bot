@@ -8,6 +8,9 @@ from flask import Flask
 from threading import Thread
 from rapidfuzz import fuzz, process
 import io
+import httpx
+
+API_BASE_URL = "https://ttm-metrics-api-production.up.railway.app/api"
 
 # Flask app for keep-alive
 app = Flask('')
@@ -350,23 +353,28 @@ def get_canonical_exercise_name(exercise):
         return best_match[0]
     
     return exercise
-
-def store_pr(user_id, username, exercise, weight, reps, estimated_1rm, message_id, channel_id):
-    """Store a PR entry in the database"""
-    exercise = get_canonical_exercise_name(exercise)
+ 
+async def store_pr(user_id, username, exercise, weight, reps, estimated_1rm, message_id, channel_id):
+    """Store a PR entry via API"""
     
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    
-    timestamp = datetime.utcnow().isoformat()
-    
-    c.execute('''
-        INSERT INTO prs (user_id, username, exercise, weight, reps, estimated_1rm, timestamp, message_id, channel_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, username, exercise, weight, reps, estimated_1rm, timestamp, message_id, channel_id))
-    
-    conn.commit()
-    conn.close()
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f"{API_BASE_URL}/prs",
+                json={
+                    "user_id": user_id,
+                    "exercise": exercise,
+                    "weight": weight,
+                    "reps": reps
+                },
+                timeout=10.0
+            )
+            response.raise_for_status()
+            print(f'✅ Logged PR to API: {username} - {exercise} {weight}/{reps}')
+            return True
+        except Exception as e:
+            print(f'❌ API error storing PR: {e}')
+            return False
 
 def delete_prs_by_message(message_id):
     """Delete all PR entries associated with a message ID"""
@@ -426,7 +434,7 @@ async def on_message(message):
                 for exercise, weight, reps in parsed_prs:
                     estimated_1rm = calculate_1rm(weight, reps)
                     
-                    store_pr(
+                    await store_pr(
                         str(message.author.id),
                         message.author.name,
                         exercise,
@@ -500,7 +508,7 @@ async def on_message_edit(before, after):
         for exercise, weight, reps in parsed_prs:
             estimated_1rm = calculate_1rm(weight, reps)
             
-            store_pr(
+            await store_pr(
                 str(after.author.id),
                 after.author.name,
                 exercise,
