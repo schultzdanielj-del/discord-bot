@@ -314,57 +314,97 @@ async def on_message(message):
     channel_id = str(message.channel.id)
     
     if channel_id == PR_CHANNEL_ID:
-    # Skip messages starting with * (coach comments)
-    if message.content.strip().startswith('*'):
-        await bot.process_commands(message)
-        return
-    
-    content_lower = message.content.lower()
-    core_foods_keywords = ['core foods', 'core', 'food', 'ate', 'eating', 'meal', 'diet', 'nutrition', 'check in', 'checkin']
-    
-    is_core_foods = any(keyword in content_lower for keyword in core_foods_keywords)
-    
-    if is_core_foods:
-        # ... [keep existing core foods logic]
-    else:
-        # NEW PR PARSING LOGIC
-        # Get user's program for fuzzy matching
-        program_exercises = await get_user_program_exercises(str(message.author.id))
+        # Skip messages starting with * (coach comments)
+        if message.content.strip().startswith('*'):
+            await bot.process_commands(message)
+            return
         
-        # Parse PR message using new function
-        pr_data = parse_pr_message(message.content, program_exercises)
+        content_lower = message.content.lower()
+        core_foods_keywords = ['core foods', 'core', 'food', 'ate', 'eating', 'meal', 'diet', 'nutrition', 'check in', 'checkin']
         
-        if pr_data:
-            # Store using canonical exercise name from fuzzy matching
-            success = await store_pr(
-                str(message.author.id),
-                message.author.name,
-                pr_data['canonical_exercise'],  # NEW: Uses fuzzy-matched name
-                pr_data['weight'],
-                pr_data['reps'],
-                pr_data['estimated_1rm'],
-                str(message.id),
-                str(message.channel.id)
-            )
-            
-            if success:
-                # Award XP
-                xp_earned = 100
+        is_core_foods = any(keyword in content_lower for keyword in core_foods_keywords)
+        
+        if is_core_foods:
+            if can_award_core_foods_xp(str(message.author.id)):
+                xp_earned = 200
+                
                 add_xp(
                     str(message.author.id),
                     message.author.name,
                     xp_earned,
-                    "PR logged"
+                    "Core foods check-in"
                 )
                 
-                # React
-                await message.add_reaction('💪')
+                success = record_core_foods_checkin(str(message.author.id), str(message.id), xp_earned)
                 
-                # Log details
-                fuzzy_note = " (fuzzy matched)" if pr_data['used_fuzzy'] else ""
-                print(f'Logged PR: {message.author.name} - {pr_data["canonical_exercise"]} '
-                      f'{pr_data["weight"]}/{pr_data["reps"]} '
-                      f'(Est. 1RM: {pr_data["estimated_1rm"]:.1f}){fuzzy_note}')
+                if success:
+                    await message.add_reaction('🍎')
+                    await message.add_reaction('✅')
+            else:
+                await message.add_reaction('✅')
+        else:
+            # NEW PR PARSING LOGIC
+            # Get user's program for fuzzy matching
+            program_exercises = await get_user_program_exercises(str(message.author.id))
+            
+            # Parse PR message using new function
+            pr_data = parse_pr_message(message.content, program_exercises)
+            
+            if pr_data:
+                # Store using canonical exercise name from fuzzy matching
+                success = await store_pr(
+                    str(message.author.id),
+                    message.author.name,
+                    pr_data['canonical_exercise'],  # NEW: Uses fuzzy-matched name
+                    pr_data['weight'],
+                    pr_data['reps'],
+                    pr_data['estimated_1rm'],
+                    str(message.id),
+                    str(message.channel.id)
+                )
+                
+                if success:
+                    # Award XP
+                    xp_earned = 100
+                    add_xp(
+                        str(message.author.id),
+                        message.author.name,
+                        xp_earned,
+                        "PR logged"
+                    )
+                    
+                    # React
+                    await message.add_reaction('💪')
+                    
+                    # Log details
+                    fuzzy_note = " (fuzzy matched)" if pr_data['used_fuzzy'] else ""
+                    print(f'Logged PR: {message.author.name} - {pr_data["canonical_exercise"]} '
+                          f'{pr_data["weight"]}/{pr_data["reps"]} '
+                          f'(Est. 1RM: {pr_data["estimated_1rm"]:.1f}){fuzzy_note}')
+    
+    elif channel_id == LOGS_CHANNEL_ID:
+        if len(message.content) >= 300:
+            if can_award_weekly_log_xp(str(message.author.id)):
+                xp_earned = 800
+                
+                if message.attachments:
+                    xp_earned += 50
+                
+                add_xp(
+                    str(message.author.id),
+                    message.author.name,
+                    xp_earned,
+                    "Weekly log"
+                )
+                
+                record_weekly_log(str(message.author.id), str(message.id), xp_earned)
+                
+                await message.add_reaction('📝')
+                await message.add_reaction('✅')
+            else:
+                await message.add_reaction('⏰')
+    
+    await bot.process_commands(message)
 
 @bot.event
 async def on_message_edit(before, after):
