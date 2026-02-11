@@ -302,11 +302,18 @@ async def on_ready():
     """Called when the bot is ready"""
     print(f'{bot.user} has connected to Discord!')
     print(f'Monitoring channels for PR entries...')
-    print(f'✅ Using NEW normalization and fuzzy matching')  # ADD THIS LINE
+    print(f'✅ Using NEW normalization and fuzzy matching')
     init_db()
 
 @bot.event
-if channel_id == PR_CHANNEL_ID:
+async def on_message(message):
+    """Monitor all messages in the specified channels"""
+    if message.author.bot:
+        return
+    
+    channel_id = str(message.channel.id)
+    
+    if channel_id == PR_CHANNEL_ID:
     # Skip messages starting with * (coach comments)
     if message.content.strip().startswith('*'):
         await bot.process_commands(message)
