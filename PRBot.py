@@ -10,6 +10,8 @@ from threading import Thread
 from rapidfuzz import fuzz, process
 import io
 import httpx
+from exercise_normalization import normalize_exercise_name
+from fuzzy_matching import parse_pr_message, get_canonical_with_tiebreaker
 
 API_BASE_URL = "https://ttm-metrics-api-production.up.railway.app/api"
 
@@ -94,6 +96,35 @@ def init_db():
     
     conn.commit()
     conn.close()
+
+async def get_user_program_exercises(user_id):
+    """
+    Fetch user's program exercises from API for fuzzy matching.
+    Returns list of canonical exercise names from all workouts (A, B, C, D, E).
+    
+    TODO: Replace this with actual API call once workouts endpoint is ready.
+    For now, returns empty list (fuzzy matching will store as-is).
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_BASE_URL}/workouts/{user_id}",
+                timeout=5.0
+            )
+            if response.status_code == 200:
+                workouts = response.json()
+                # Extract all exercises from all workout days
+                exercises = []
+                for workout in workouts.get('workouts', []):
+                    for exercise in workout.get('exercises', []):
+                        exercises.append(exercise['name'])
+                return exercises
+    except Exception as e:
+        print(f"Could not fetch user program: {e}")
+    
+    # Return empty list if API not ready - normalization still works
+    return []
+
 
 def calculate_1rm(weight, reps):
     """Calculate estimated 1 rep max using Epley formula"""
@@ -231,130 +262,6 @@ def record_core_foods_checkin(user_id, message_id, xp_awarded):
     conn.close()
     return success
 
-def normalize_exercise_name(exercise):
-    """Normalize exercise names to standardize variations"""
-    exercise = exercise.lower().strip()
-    
-    words = exercise.split()
-    normalized_words = []
-    
-    for word in words:
-        if len(word) > 2 and word.endswith('s') and not word.endswith('ss'):
-            normalized_words.append(word[:-1])
-        else:
-            normalized_words.append(word)
-    
-    exercise = ' '.join(normalized_words)
-    
-    exercise = re.sub(r'\b(1|one|single)\s+arm\b', 'single arm', exercise)
-    exercise = re.sub(r'\b(uh|underhand\s+grip)\b', 'underhand', exercise)
-    exercise = re.sub(r'\bdb\b', 'dumbbell', exercise)
-    exercise = re.sub(r'\bbb\b', 'barbell', exercise)
-    exercise = re.sub(r'\bflye?\b', 'fly', exercise)
-    exercise = re.sub(r'\blateral\b', 'lateral raise', exercise)
-    exercise = re.sub(r'\brdf\b', 'rear delt fly', exercise)
-    exercise = re.sub(r'\bsupp\b', 'supported', exercise)
-    
-    if 'extension' in exercise:
-        if not re.search(r'\b(leg|back|reverse|hyper|hip)\s+extension', exercise):
-            exercise = re.sub(r'\bextension\b', 'tricep extension', exercise)
-    
-    exercise = re.sub(r'\s+', ' ', exercise).strip()
-    
-    return exercise
-
-def parse_single_pr(text):
-    """Parse a single PR from text"""
-    text = text.strip().lower()
-    
-    if not text:
-        return None
-    
-    text = re.sub(r'\bbw\b', '0', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bbodyweight\b', '0', text, flags=re.IGNORECASE)
-    
-    text = re.sub(r'\b(pr|new pr|hit|got|did|at|for|with|just|finally|crushed)\b', ' ', text)
-    text = re.sub(r'\b(reps?|rep|repetitions?)\b', '', text)
-    text = re.sub(r'\b(lbs?|pounds?|kgs?|kilos?)\b', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    
-    p1 = r'^(\w+)\s+([\d.]+)\s*[/*x]\s*(\d+)$'
-    p2 = r'^(.+?)\s+([\d.]+)\s*[/*x]\s*(\d+)$'
-    p3 = r'^(.+?)\s+([\d.]+)\s*-\s*(\d+)$'
-    p4 = r'^(\d+)\s*[x]\s*([\d.]+)\s+(.+)$'
-    p5 = r'^(.+?):\s*([\d.]+)\s*[/*x]\s*(\d+)$'
-    p6 = r'^(.+?)\s+([\d.]+)\s+(\d+)$'
-    
-    all_patterns = [p1, p2, p3, p4, p5, p6]
-    
-    for idx, pattern in enumerate(all_patterns):
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            groups = match.groups()
-            
-            if idx == 3:
-                reps = int(groups[0])
-                weight = float(groups[1])
-                exercise = groups[2].strip()
-            else:
-                exercise = groups[0].strip()
-                weight = float(groups[1])
-                reps = int(groups[2])
-            
-            exercise = re.sub(r'[^\w\s]', '', exercise)
-            exercise = re.sub(r'\s+', ' ', exercise).strip()
-            exercise = normalize_exercise_name(exercise)
-            
-            if exercise and weight >= 0 and reps > 0 and reps < 1000:
-                return (exercise, weight, reps)
-    
-    return None
-
-def parse_all_prs(message_content):
-    """Parse multiple PR entries from a single message"""
-    prs = []
-    text = message_content.strip()
-    lines = text.split('\n')
-    
-    for line in lines:
-        parsed = parse_single_pr(line)
-        if parsed:
-            prs.append(parsed)
-    
-    if not prs:
-        parsed = parse_single_pr(text)
-        if parsed:
-            prs.append(parsed)
-    
-    return prs
-
-def get_canonical_exercise_name(exercise):
-    """Match exercise name to existing exercises using fuzzy matching"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    
-    c.execute('''
-        SELECT exercise, COUNT(*) as count 
-        FROM prs 
-        GROUP BY exercise 
-        ORDER BY count DESC
-    ''')
-    
-    existing_exercises = c.fetchall()
-    conn.close()
-    
-    if not existing_exercises:
-        return exercise
-    
-    exercise_names = [ex[0] for ex in existing_exercises]
-    
-    best_match = process.extractOne(exercise, exercise_names, scorer=fuzz.ratio)
-    
-    if best_match and best_match[1] >= 85:
-        return best_match[0]
-    
-    return exercise
- 
 async def store_pr(user_id, username, exercise, weight, reps, estimated_1rm, message_id, channel_id):
     """Store a PR entry via API"""
     
@@ -395,102 +302,62 @@ async def on_ready():
     """Called when the bot is ready"""
     print(f'{bot.user} has connected to Discord!')
     print(f'Monitoring channels for PR entries...')
+    print(f'✅ Using NEW normalization and fuzzy matching')  # ADD THIS LINE
     init_db()
 
 @bot.event
-async def on_message(message):
-    """Monitor all messages in the specified channels"""
-    if message.author.bot:
+if channel_id == PR_CHANNEL_ID:
+    # Skip messages starting with * (coach comments)
+    if message.content.strip().startswith('*'):
+        await bot.process_commands(message)
         return
     
-    channel_id = str(message.channel.id)
+    content_lower = message.content.lower()
+    core_foods_keywords = ['core foods', 'core', 'food', 'ate', 'eating', 'meal', 'diet', 'nutrition', 'check in', 'checkin']
     
-    if channel_id == PR_CHANNEL_ID:
-        content_lower = message.content.lower()
-        core_foods_keywords = ['core foods', 'core', 'food', 'ate', 'eating', 'meal', 'diet', 'nutrition', 'check in', 'checkin']
+    is_core_foods = any(keyword in content_lower for keyword in core_foods_keywords)
+    
+    if is_core_foods:
+        # ... [keep existing core foods logic]
+    else:
+        # NEW PR PARSING LOGIC
+        # Get user's program for fuzzy matching
+        program_exercises = await get_user_program_exercises(str(message.author.id))
         
-        is_core_foods = any(keyword in content_lower for keyword in core_foods_keywords)
+        # Parse PR message using new function
+        pr_data = parse_pr_message(message.content, program_exercises)
         
-        if is_core_foods:
-            if can_award_core_foods_xp(str(message.author.id)):
-                xp_earned = 200
-                
-                add_xp(
-                    str(message.author.id),
-                    message.author.name,
-                    xp_earned,
-                    "Core foods check-in"
-                )
-                
-                success = record_core_foods_checkin(str(message.author.id), str(message.id), xp_earned)
-                
-                if success:
-                    await message.add_reaction('🍎')
-                    await message.add_reaction('✅')
-            else:
-                await message.add_reaction('✅')
-        else:
-            parsed_prs = parse_all_prs(message.content)
+        if pr_data:
+            # Store using canonical exercise name from fuzzy matching
+            success = await store_pr(
+                str(message.author.id),
+                message.author.name,
+                pr_data['canonical_exercise'],  # NEW: Uses fuzzy-matched name
+                pr_data['weight'],
+                pr_data['reps'],
+                pr_data['estimated_1rm'],
+                str(message.id),
+                str(message.channel.id)
+            )
             
-            if parsed_prs:
-                logged_count = 0
-                
-                for exercise, weight, reps in parsed_prs:
-                    estimated_1rm = calculate_1rm(weight, reps)
-
-                    canonical_exercise = get_canonical_exercise_name(exercise) 
-                    
-                    await store_pr(
-                        str(message.author.id),
-                        message.author.name,
-                        canonical_exercise,
-                        weight,
-                        reps,
-                        estimated_1rm,
-                        str(message.id),
-                        str(message.channel.id)
-                    )
-                    
-                    logged_count += 1
-                    print(f'Logged PR: {message.author.name} - {exercise} {weight}/{reps} (Est. 1RM: {estimated_1rm:.1f})')
-                
-                xp_earned = logged_count * 100
+            if success:
+                # Award XP
+                xp_earned = 100
                 add_xp(
                     str(message.author.id),
                     message.author.name,
                     xp_earned,
-                    f"{logged_count} PR(s)"
+                    "PR logged"
                 )
                 
-                if logged_count == 1:
-                    await message.add_reaction('💪')
-                elif logged_count > 1:
-                    await message.add_reaction('💪')
-                    await message.add_reaction('🔥')
-    
-    elif channel_id == LOGS_CHANNEL_ID:
-        if len(message.content) >= 300:
-            if can_award_weekly_log_xp(str(message.author.id)):
-                xp_earned = 800
+                # React
+                await message.add_reaction('💪')
                 
-                if message.attachments:
-                    xp_earned += 50
-                
-                add_xp(
-                    str(message.author.id),
-                    message.author.name,
-                    xp_earned,
-                    "Weekly log"
-                )
-                
-                record_weekly_log(str(message.author.id), str(message.id), xp_earned)
-                
-                await message.add_reaction('📝')
-                await message.add_reaction('✅')
-            else:
-                await message.add_reaction('⏰')
-    
-    await bot.process_commands(message)
+                # Log details
+                fuzzy_note = " (fuzzy matched)" if pr_data['used_fuzzy'] else ""
+                print(f'Logged PR: {message.author.name} - {pr_data["canonical_exercise"]} '
+                      f'{pr_data["weight"]}/{pr_data["reps"]} '
+                      f'(Est. 1RM: {pr_data["estimated_1rm"]:.1f}){fuzzy_note}')
 
 @bot.event
 async def on_message_edit(before, after):
@@ -504,36 +371,38 @@ async def on_message_edit(before, after):
     if before.content == after.content:
         return
     
+    # Skip coach comments
+    if after.content.strip().startswith('*'):
+        return
+    
     deleted_count = delete_prs_by_message(str(after.id))
     
-    parsed_prs = parse_all_prs(after.content)
+    # Get user's program for fuzzy matching
+    program_exercises = await get_user_program_exercises(str(after.author.id))
     
-    if parsed_prs:
-        logged_count = 0
+    # Parse using new function
+    pr_data = parse_pr_message(after.content, program_exercises)
+    
+    if pr_data:
+        success = await store_pr(
+            str(after.author.id),
+            after.author.name,
+            pr_data['canonical_exercise'],
+            pr_data['weight'],
+            pr_data['reps'],
+            pr_data['estimated_1rm'],
+            str(after.id),
+            str(after.channel.id)
+        )
         
-        for exercise, weight, reps in parsed_prs:
-            estimated_1rm = calculate_1rm(weight, reps)
-
-            canonical_exercise = get_canonical_exercise_name(exercise)
+        if success:
+            await after.add_reaction('🔄')
+            fuzzy_note = " (fuzzy matched)" if pr_data['used_fuzzy'] else ""
+            print(f'Updated PR: {after.author.name} - {pr_data["canonical_exercise"]} '
+                  f'{pr_data["weight"]}/{pr_data["reps"]}{fuzzy_note}')
             
-            await store_pr(
-                str(after.author.id),
-                after.author.name,
-               canonical_exercise,
-                weight,
-                reps,
-                estimated_1rm,
-                str(after.id),
-                str(after.channel.id)
-            )
-            
-            logged_count += 1
-            print(f'Updated PR: {after.author.name} - {exercise} {weight}/{reps} (Est. 1RM: {estimated_1rm:.1f})')
-        
-        await after.add_reaction('🔄')
-        
-        if deleted_count > 0:
-            print(f'Replaced {deleted_count} old PR(s) with {logged_count} new PR(s) for message {after.id}')
+            if deleted_count > 0:
+                print(f'Replaced {deleted_count} old PR(s) with new data for message {after.id}')
     else:
         if deleted_count > 0:
             await after.add_reaction('❌')
@@ -581,39 +450,6 @@ async def progress_command(ctx):
     """Shows progress for each exercise (minimum PR vs maximum PR)"""
     user_id = str(ctx.author.id)
     
-    # Local copy of normalization function
-    def normalize_exercise_name_local(exercise):
-        """Normalize exercise names to standardize variations"""
-        exercise = exercise.lower().strip()
-        
-        words = exercise.split()
-        normalized_words = []
-        
-        for word in words:
-            if len(word) > 2 and word.endswith('s') and not word.endswith('ss'):
-                normalized_words.append(word[:-1])
-            else:
-                normalized_words.append(word)
-        
-        exercise = ' '.join(normalized_words)
-        
-        exercise = re.sub(r'\b(1|one|single)\s+arm\b', 'single arm', exercise)
-        exercise = re.sub(r'\b(uh|underhand\s+grip)\b', 'underhand', exercise)
-        exercise = re.sub(r'\bdb\b', 'dumbbell', exercise)
-        exercise = re.sub(r'\bbb\b', 'barbell', exercise)
-        exercise = re.sub(r'\bflye?\b', 'fly', exercise)
-        exercise = re.sub(r'\blateral\b', 'lateral raise', exercise)
-        exercise = re.sub(r'\brdf\b', 'rear delt fly', exercise)
-        exercise = re.sub(r'\bsupp\b', 'supported', exercise)
-        
-        if 'extension' in exercise:
-            if not re.search(r'\b(leg|back|reverse|hyper|hip)\s+extension', exercise):
-                exercise = re.sub(r'\bextension\b', 'tricep extension', exercise)
-        
-        exercise = re.sub(r'\s+', ' ', exercise).strip()
-        
-        return exercise
-    
     try:
         # Fetch all PRs for this user from API
         async with aiohttp.ClientSession() as session:
@@ -630,13 +466,13 @@ async def progress_command(ctx):
             await ctx.send("No PRs found! Post your first PR to get started. 💪")
             return
         
-        # Group PRs by NORMALIZED exercise name
+        # Group PRs by exercise name (already normalized in database)
         exercise_prs = {}
         for pr in prs:
-            normalized_exercise = normalize_exercise_name_local(pr['exercise'])  # <-- KEY FIX
-            if normalized_exercise not in exercise_prs:
-                exercise_prs[normalized_exercise] = []
-            exercise_prs[normalized_exercise].append(pr)
+            exercise = pr['exercise']
+            if exercise not in exercise_prs:
+                exercise_prs[exercise] = []
+            exercise_prs[exercise].append(pr)
         
         # Build progress report
         lines = [f"**Progress Report for {ctx.author.display_name}**\n"]
