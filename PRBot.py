@@ -455,6 +455,21 @@ async def on_message_edit(before, after):
             await after.add_reaction('❌')
             print(f'Removed {deleted_count} PR(s) from edited message {after.id} (no longer valid)')
 
+@bot.event
+async def on_message_delete(message):
+    """Handle deleted messages - remove associated PRs from database"""
+    if message.author.bot:
+        return
+    
+    if str(message.channel.id) != PR_CHANNEL_ID:
+        return
+    
+    # Delete all PRs associated with this message
+    deleted_count = delete_prs_by_message(str(message.id))
+    
+    if deleted_count > 0:
+        print(f'🗑️ Deleted {deleted_count} PR(s) from deleted message {message.id} by {message.author.name}')
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def prcount(ctx):
