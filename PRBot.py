@@ -458,12 +458,19 @@ async def on_message_edit(before, after):
 @bot.event
 async def on_raw_message_delete(payload):
     """Handle deleted messages - remove associated PRs from database"""
+    print(f'🔍 DEBUG: Message deleted - channel_id: {payload.channel_id}, message_id: {payload.message_id}')
+    
     # Only process deletions from PR channel
     if str(payload.channel_id) != PR_CHANNEL_ID:
+        print(f'🔍 DEBUG: Not PR channel. Expected: {PR_CHANNEL_ID}, Got: {payload.channel_id}')
         return
+    
+    print(f'🔍 DEBUG: PR channel match! Attempting to delete PRs for message {payload.message_id}')
     
     # Delete all PRs associated with this message
     deleted_count = delete_prs_by_message(str(payload.message_id))
+    
+    print(f'🔍 DEBUG: Deleted {deleted_count} PR(s) from database')
     
     if deleted_count > 0:
         print(f'🗑️ Deleted {deleted_count} PR(s) from deleted message {payload.message_id}')
