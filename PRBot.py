@@ -34,7 +34,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Database setup
+# Database setup - local SQLite only for XP/logs/core-foods (legacy)
 DB_NAME = '/data/pr_tracker.db'
 
 # Channel IDs
@@ -47,6 +47,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     
+    # Legacy table - no longer written to, but kept for schema compat
     c.execute('''
         CREATE TABLE IF NOT EXISTS prs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,9 +102,6 @@ async def get_user_program_exercises(user_id):
     """
     Fetch user's program exercises from API for fuzzy matching.
     Returns list of canonical exercise names from all workouts (A, B, C, D, E).
-    
-    TODO: Replace this with actual API call once workouts endpoint is ready.
-    For now, returns empty list (fuzzy matching will store as-is).
     """
     try:
         async with httpx.AsyncClient() as client:
@@ -122,7 +120,6 @@ async def get_user_program_exercises(user_id):
     except Exception as e:
         print(f"Could not fetch user program: {e}")
     
-    # Return empty list if API not ready - normalization still works
     return []
 
 
@@ -287,15 +284,22 @@ async def store_pr(user_id, username, exercise, weight, reps, estimated_1rm, mes
                 print(f'Response body: {e.response.text}')
             return False
 
-def delete_prs_by_message(message_id):
-    """Delete all PR entries associated with a message ID"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('DELETE FROM prs WHERE message_id = ?', (message_id,))
-    deleted_count = c.rowcount
-    conn.commit()
-    conn.close()
-    return deleted_count
+async def delete_prs_by_message_api(message_id):
+    """Delete all PR entries associated with a message ID via API"""
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.delete(
+                f"{API_BASE_URL}/prs/message/{message_id}",
+                timeout=10.0
+            )
+            response.raise_for_status()
+            data = response.json()
+            deleted_count = data.get("deleted_count", 0)
+            print(f'🗑️ API deleted {deleted_count} PR(s) for message {message_id}')
+            return deleted_count
+        except Exception as e:
+            print(f'❌ API error deleting PRs for message {message_id}: {e}')
+            return 0
 
 @bot.event
 async def on_ready():
@@ -303,6 +307,7 @@ async def on_ready():
     print(f'{bot.user} has connected to Discord!')
     print(f'Monitoring channels for PR entries...')
     print(f'✅ Using NEW normalization and fuzzy matching')
+    print(f'✅ All commands use API (PostgreSQL)')
     init_db()
 
 @bot.event
@@ -355,7 +360,7 @@ async def on_message(message):
                 success = await store_pr(
                     str(message.author.id),
                     message.author.name,
-                    pr_data['canonical_exercise'],  # NEW: Uses fuzzy-matched name
+                    pr_data['canonical_exercise'],  # Uses fuzzy-matched name
                     pr_data['weight'],
                     pr_data['reps'],
                     pr_data['estimated_1rm'],
@@ -422,7 +427,8 @@ async def on_message_edit(before, after):
     if after.content.strip().startswith('*'):
         return
     
-    deleted_count = delete_prs_by_message(str(after.id))
+    # Delete old PRs via API
+    deleted_count = await delete_prs_by_message_api(str(after.id))
     
     # Get user's program for fuzzy matching
     program_exercises = await get_user_program_exercises(str(after.author.id))
@@ -457,20 +463,19 @@ async def on_message_edit(before, after):
 
 @bot.event
 async def on_raw_message_delete(payload):
-    """Handle deleted messages - remove associated PRs from database"""
+    """Handle deleted messages - remove associated PRs via API"""
     print(f'🔍 DEBUG: Message deleted - channel_id: {payload.channel_id}, message_id: {payload.message_id}')
     
-    # Only process deletions from PR channel
     if str(payload.channel_id) != PR_CHANNEL_ID:
         print(f'🔍 DEBUG: Not PR channel. Expected: {PR_CHANNEL_ID}, Got: {payload.channel_id}')
         return
     
     print(f'🔍 DEBUG: PR channel match! Attempting to delete PRs for message {payload.message_id}')
     
-    # Delete all PRs associated with this message
-    deleted_count = delete_prs_by_message(str(payload.message_id))
+    # Delete via API
+    deleted_count = await delete_prs_by_message_api(str(payload.message_id))
     
-    print(f'🔍 DEBUG: Deleted {deleted_count} PR(s) from database')
+    print(f'🔍 DEBUG: Deleted {deleted_count} PR(s) from API')
     
     if deleted_count > 0:
         print(f'🗑️ Deleted {deleted_count} PR(s) from deleted message {payload.message_id}')
@@ -478,39 +483,47 @@ async def on_raw_message_delete(payload):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def prcount(ctx):
-    """Check total number of PRs stored"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM prs')
-    count = c.fetchone()[0]
-    conn.close()
-    
-    await ctx.send(f'Total PRs stored: {count}')
+    """Check total number of PRs stored (via API)"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{API_BASE_URL}/prs/count", timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+            await ctx.send(f'Total PRs stored: {data["total_prs"]}')
+    except Exception as e:
+        await ctx.send(f"❌ Error fetching PR count: {e}")
 
 @bot.command()
 async def mylatest(ctx):
-    """Check your 5 most recent PRs"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''
-        SELECT exercise, weight, reps, estimated_1rm, timestamp 
-        FROM prs 
-        WHERE user_id = ? 
-        ORDER BY timestamp DESC 
-        LIMIT 5
-    ''', (str(ctx.author.id),))
-    
-    records = c.fetchall()
-    conn.close()
-    
-    if records:
-        response = "**Your latest PRs:**\n"
-        for exercise, weight, reps, est_1rm, timestamp in records:
-            date = datetime.fromisoformat(timestamp).strftime('%Y-%m-%d')
-            response += f"• {exercise}: {weight}/{reps} (Est. 1RM: {est_1rm:.1f}) - {date}\n"
-        await ctx.send(response)
-    else:
-        await ctx.send("No PRs found for you yet!")
+    """Check your 5 most recent PRs (via API)"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_BASE_URL}/prs/{ctx.author.id}/latest?limit=5",
+                timeout=10.0
+            )
+            response.raise_for_status()
+            records = response.json()
+        
+        if records:
+            response_text = "**Your latest PRs:**\n"
+            for pr in records:
+                ts = pr.get('timestamp', '')
+                if ts:
+                    # Handle both ISO format strings
+                    date = ts[:10]
+                else:
+                    date = 'Unknown'
+                weight = pr['weight']
+                reps = pr['reps']
+                est_1rm = pr['estimated_1rm']
+                exercise = pr['exercise']
+                response_text += f"• {exercise}: {weight}/{reps} (Est. 1RM: {est_1rm:.1f}) - {date}\n"
+            await ctx.send(response_text)
+        else:
+            await ctx.send("No PRs found for you yet!")
+    except Exception as e:
+        await ctx.send(f"❌ Error fetching latest PRs: {e}")
 
 @bot.command(name='progress')
 async def progress_command(ctx):
@@ -519,15 +532,16 @@ async def progress_command(ctx):
     
     try:
         # Fetch all PRs for this user from API
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f'https://ttm-metrics-api-production.up.railway.app/api/prs/{user_id}'
-            ) as response:
-                if response.status != 200:
-                    await ctx.send(f"❌ Error fetching PRs: {response.status}")
-                    return
-                
-                prs = await response.json()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f'{API_BASE_URL}/prs/{user_id}',
+                timeout=10.0
+            )
+            if response.status_code != 200:
+                await ctx.send(f"❌ Error fetching PRs: {response.status_code}")
+                return
+            
+            prs = response.json()
         
         if not prs:
             await ctx.send("No PRs found! Post your first PR to get started. 💪")
@@ -551,7 +565,6 @@ async def progress_command(ctx):
             is_bodyweight = all(pr['weight'] == 0 for pr in prs_list)
             
             if is_bodyweight:
-                # For bodyweight: find min and max reps
                 min_pr = min(prs_list, key=lambda x: x['reps'])
                 max_pr = max(prs_list, key=lambda x: x['reps'])
                 
@@ -570,7 +583,6 @@ async def progress_command(ctx):
                     lines.append(f"**{exercise}**: {max_reps} reps")
             
             else:
-                # For weighted exercises: find min and max e1RM
                 min_pr = min(prs_list, key=lambda x: x['estimated_1rm'])
                 max_pr = max(prs_list, key=lambda x: x['estimated_1rm'])
                 
@@ -588,7 +600,6 @@ async def progress_command(ctx):
                 else:
                     lines.append(f"**{exercise}**: {max_1rm:.0f}lb e1RM")
             
-            # Show PR count for this exercise
             lines.append(f"  └ {len(prs_list)} total PRs\n")
         
         # Send in chunks if too long
@@ -614,35 +625,44 @@ async def progress_command(ctx):
         print(f"Progress command error: {e}")
         import traceback
         traceback.print_exc()
+
 @bot.command()
 async def level(ctx):
     """Check your current level and XP"""
-    total_xp, level = get_user_xp_info(str(ctx.author.id))
+    total_xp, level_val = get_user_xp_info(str(ctx.author.id))
     
     xp_for_current = 0
-    for i in range(1, level):
+    for i in range(1, level_val):
         xp_for_current += 250 + (i * 250)
     
     xp_in_level = total_xp - xp_for_current
-    xp_needed_for_next = get_xp_for_next_level(level)
+    xp_needed_for_next = get_xp_for_next_level(level_val)
     progress_pct = (xp_in_level / xp_needed_for_next) * 100
     
     bar_length = 20
     filled = int((progress_pct / 100) * bar_length)
     bar = '█' * filled + '░' * (bar_length - filled)
     
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('SELECT COUNT(*) FROM prs WHERE user_id = ?', (str(ctx.author.id),))
-    pr_count = c.fetchone()[0]
-    conn.close()
+    # Get PR count from API
+    pr_count = 0
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_BASE_URL}/prs/{ctx.author.id}/count",
+                timeout=10.0
+            )
+            if response.status_code == 200:
+                data = response.json()
+                pr_count = data.get("pr_count", 0)
+    except Exception as e:
+        print(f"Error fetching PR count for level command: {e}")
     
-    response = f"⚔️ **Level {level}**\n\n"
+    response = f"⚔️ **Level {level_val}**\n\n"
     response += f"**XP:** {xp_in_level:,} / {xp_needed_for_next:,} ({progress_pct:.1f}%)\n"
     response += f"[{bar}]\n\n"
     response += f"**Total XP:** {total_xp:,}\n"
     response += f"**Lifetime PRs:** {pr_count}\n"
-    response += f"**Next Level:** {level + 1} (need {xp_needed_for_next - xp_in_level:,} more XP)\n"
+    response += f"**Next Level:** {level_val + 1} (need {xp_needed_for_next - xp_in_level:,} more XP)\n"
     
     await ctx.send(response)
 
@@ -699,9 +719,7 @@ async def monthly_content(ctx):
     await _generate_content_summary(ctx, days=30, period_name="Month")
 
 async def _generate_content_summary(ctx, days, period_name):
-    """Generate content summary for specified time period"""
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+    """Generate content summary for specified time period - uses API for PRs, local for XP/logs"""
     
     # Calculate date range
     end_date = datetime.utcnow()
@@ -709,16 +727,30 @@ async def _generate_content_summary(ctx, days, period_name):
     start_iso = start_date.isoformat()
     end_iso = end_date.isoformat()
     
-    # Get all PRs in period
-    c.execute('''
-        SELECT user_id, username, exercise, weight, reps, estimated_1rm, timestamp
-        FROM prs
-        WHERE timestamp >= ? AND timestamp <= ?
-        ORDER BY timestamp DESC
-    ''', (start_iso, end_iso))
-    all_prs = c.fetchall()
+    # Fetch ALL PRs from API
+    all_prs_raw = []
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{API_BASE_URL}/prs?limit=5000",
+                timeout=15.0
+            )
+            if response.status_code == 200:
+                all_prs_api = response.json()
+                # Filter to date range
+                for pr in all_prs_api:
+                    ts = pr.get('timestamp', '')
+                    if ts and ts >= start_iso and ts <= end_iso:
+                        all_prs_raw.append(pr)
+    except Exception as e:
+        print(f"Error fetching PRs for content summary: {e}")
+        await ctx.send(f"❌ Error fetching PR data from API: {e}")
+        return
     
-    # Get weekly logs in period
+    # Get weekly logs and core foods from local DB
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
     c.execute('''
         SELECT user_id, COUNT(*) as log_count
         FROM weekly_logs
@@ -727,7 +759,6 @@ async def _generate_content_summary(ctx, days, period_name):
     ''', (start_iso, end_iso))
     weekly_logs = dict(c.fetchall())
     
-    # Get core foods check-ins in period
     c.execute('''
         SELECT user_id, COUNT(*) as checkin_count
         FROM core_foods_checkins
@@ -736,13 +767,12 @@ async def _generate_content_summary(ctx, days, period_name):
     ''', (start_iso, end_iso))
     core_foods = dict(c.fetchall())
     
-    # Get all users for total member count
     c.execute('SELECT user_id, username, total_xp, level FROM user_xp ORDER BY level DESC')
     all_users = c.fetchall()
     
     conn.close()
     
-    if not all_prs and not weekly_logs and not core_foods:
+    if not all_prs_raw and not weekly_logs and not core_foods:
         await ctx.send(f"No activity found in the past {days} days!")
         return
     
@@ -751,7 +781,15 @@ async def _generate_content_summary(ctx, days, period_name):
     total_pr_count = 0
     exercise_prs = {}
     
-    for user_id, username, exercise, weight, reps, est_1rm, timestamp in all_prs:
+    for pr in all_prs_raw:
+        user_id = pr.get('user_id', '')
+        username = pr.get('username', 'Unknown')
+        exercise = pr.get('exercise', '')
+        weight = pr.get('weight', 0)
+        reps = pr.get('reps', 0)
+        est_1rm = pr.get('estimated_1rm', 0)
+        timestamp = pr.get('timestamp', '')
+        
         if user_id not in user_prs:
             user_prs[user_id] = {
                 'username': username,
@@ -768,7 +806,6 @@ async def _generate_content_summary(ctx, days, period_name):
         user_prs[user_id]['pr_count'] += 1
         total_pr_count += 1
         
-        # Track PRs by exercise
         if exercise not in exercise_prs:
             exercise_prs[exercise] = 0
         exercise_prs[exercise] += 1
@@ -777,7 +814,6 @@ async def _generate_content_summary(ctx, days, period_name):
     standout_moments = []
     
     for user_id, data in user_prs.items():
-        # Check for PR streaks
         consecutive_days = {}
         for pr in data['prs']:
             day = pr['timestamp'][:10]
@@ -790,7 +826,6 @@ async def _generate_content_summary(ctx, days, period_name):
             if max_in_day >= 5:
                 standout_moments.append(f"{data['username']} hit {max_in_day} PRs in a single day")
         
-        # Check for big improvements in single exercise
         exercise_progress = {}
         for pr in sorted(data['prs'], key=lambda x: x['timestamp']):
             ex = pr['exercise']
@@ -804,14 +839,11 @@ async def _generate_content_summary(ctx, days, period_name):
             if improvement >= 20:
                 standout_moments.append(f"{data['username']} added +{improvement:.0f}lbs to {ex}")
     
-    # Get top users by PR count
     top_users = sorted(user_prs.items(), key=lambda x: x[1]['pr_count'], reverse=True)[:5]
     
-    # Count active members
     active_members = len(user_prs)
     total_members = len(all_users)
     
-    # Format the summary
     summary = f"📊 **{period_name.upper()} SUMMARY ({start_date.strftime('%b %d')} - {end_date.strftime('%b %d')})**\n\n"
     
     summary += f"👥 **ACTIVE MEMBERS:** {active_members}/{total_members} ({(active_members/max(total_members,1)*100):.0f}%)\n\n"
@@ -820,11 +852,8 @@ async def _generate_content_summary(ctx, days, period_name):
     for user_id, data in top_users:
         username = data['username']
         pr_count = data['pr_count']
-        
-        # Get sample PRs
         sample_prs = data['prs'][:3]
         pr_samples = ", ".join([f"{pr['exercise']} +{pr['weight']:.0f}lbs" for pr in sample_prs])
-        
         summary += f"- {username}: {pr_count} PRs ({pr_samples}...)\n"
     
     summary += f"\n📝 **WEEKLY LOGS:** {sum(weekly_logs.values())} submitted\n"
@@ -843,7 +872,6 @@ async def _generate_content_summary(ctx, days, period_name):
     
     summary += f"\n🏆 **TOP XP EARNERS (ESTIMATED):**\n"
     for i, (user_id, data) in enumerate(top_users, 1):
-        # Estimate XP: PRs * 100 + logs * 800 + core foods * 200
         est_xp = (data['pr_count'] * 100) + (weekly_logs.get(user_id, 0) * 800) + (core_foods.get(user_id, 0) * 200)
         summary += f"{i}. {data['username']}: ~{est_xp:,} XP\n"
     
@@ -852,7 +880,6 @@ async def _generate_content_summary(ctx, days, period_name):
         for moment in standout_moments[:5]:
             summary += f"- {moment}\n"
     
-    # Top exercises this period
     if exercise_prs:
         top_exercises = sorted(exercise_prs.items(), key=lambda x: x[1], reverse=True)[:5]
         summary += f"\n💥 **MOST POPULAR EXERCISES:**\n"
@@ -862,12 +889,10 @@ async def _generate_content_summary(ctx, days, period_name):
     summary += f"\n---\n\n"
     summary += f"**PASTE THIS INTO CLAUDE WITH YOUR CONTENT GENERATION PROMPT**\n"
     
-    # Send via DM
     try:
         await ctx.author.send(summary)
         await ctx.send("✅ Content summary sent to your DMs!")
     except discord.Forbidden:
-        # If DMs are disabled, send in channel
         await ctx.send(summary)
 
 @bot.command()
@@ -883,15 +908,12 @@ async def monthly_raw(ctx):
 async def _export_raw_activity(ctx, days, period_name):
     """Export complete raw Discord activity for Claude to analyze"""
     
-    # Calculate date range
     end_date = datetime.utcnow()
     start_date = end_date - timedelta(days=days)
     
-    # Get the actual Discord channels
     pr_channel = bot.get_channel(int(PR_CHANNEL_ID))
     logs_channel = bot.get_channel(int(LOGS_CHANNEL_ID))
     
-    # Find general channel
     general_channel = None
     for channel in ctx.guild.text_channels:
         if 'general' in channel.name.lower():
@@ -912,7 +934,7 @@ async def _export_raw_activity(ctx, days, period_name):
             if not message.author.bot:
                 pr_messages.append(message)
         
-        pr_messages.reverse()  # chronological order
+        pr_messages.reverse()
         
         for msg in pr_messages:
             output += f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.name}:\n"
@@ -948,7 +970,7 @@ async def _export_raw_activity(ctx, days, period_name):
         
         output += f"\nTotal weekly log messages: {len(log_messages)}\n\n"
     
-    # ===== GENERAL CHANNEL (if exists) =====
+    # ===== GENERAL CHANNEL =====
     if general_channel:
         output += f"💬 **#GENERAL CHANNEL - ALL MESSAGES**\n"
         output += "=" * 80 + "\n\n"
@@ -970,42 +992,51 @@ async def _export_raw_activity(ctx, days, period_name):
         
         output += f"\nTotal general messages: {len(general_messages)}\n\n"
     
-    # ===== DATABASE STATS =====
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    
-    start_iso = start_date.isoformat()
-    end_iso = end_date.isoformat()
-    
-    # PR stats
-    c.execute('''
-        SELECT COUNT(*), COUNT(DISTINCT user_id), COUNT(DISTINCT exercise)
-        FROM prs
-        WHERE timestamp >= ? AND timestamp <= ?
-    ''', (start_iso, end_iso))
-    pr_count, unique_users_prs, unique_exercises = c.fetchone()
-    
-    # XP stats
-    c.execute('SELECT username, total_xp, level FROM user_xp ORDER BY total_xp DESC')
-    xp_stats = c.fetchall()
-    
-    conn.close()
-    
+    # ===== DATABASE STATS (from API) =====
     output += f"📈 **DATABASE STATISTICS**\n"
     output += "=" * 80 + "\n\n"
-    output += f"Total PRs logged: {pr_count}\n"
-    output += f"Unique members with PRs: {unique_users_prs}\n"
-    output += f"Unique exercises: {unique_exercises}\n\n"
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            # Total PR count
+            resp = await client.get(f"{API_BASE_URL}/prs/count", timeout=10.0)
+            total_prs = resp.json().get("total_prs", 0) if resp.status_code == 200 else 0
+            
+            # All PRs for period stats
+            resp = await client.get(f"{API_BASE_URL}/prs?limit=5000", timeout=15.0)
+            if resp.status_code == 200:
+                all_prs = resp.json()
+                # Filter to period
+                period_prs = [p for p in all_prs if p.get('timestamp', '') >= start_date.isoformat()]
+                unique_users = len(set(p.get('user_id', '') for p in period_prs))
+                unique_exercises = len(set(p.get('exercise', '') for p in period_prs))
+            else:
+                period_prs = []
+                unique_users = 0
+                unique_exercises = 0
+        
+        output += f"Total PRs in database: {total_prs}\n"
+        output += f"PRs this period: {len(period_prs)}\n"
+        output += f"Unique members with PRs: {unique_users}\n"
+        output += f"Unique exercises: {unique_exercises}\n\n"
+    except Exception as e:
+        output += f"Error fetching API stats: {e}\n\n"
+    
+    # XP stats from local
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT username, total_xp, level FROM user_xp ORDER BY total_xp DESC')
+    xp_stats = c.fetchall()
+    conn.close()
     
     output += f"**Current XP Leaderboard:**\n"
-    for username, xp, level in xp_stats:
-        output += f"- {username}: Level {level} ({xp:,} XP)\n"
+    for username, xp, lvl in xp_stats:
+        output += f"- {username}: Level {lvl} ({xp:,} XP)\n"
     
     output += "\n" + "=" * 80 + "\n"
     output += f"**END OF RAW DATA EXPORT**\n"
     output += f"Total characters: {len(output):,}\n"
     
-    # Send as text file
     file = discord.File(io.BytesIO(output.encode('utf-8')), filename=f'discord_raw_export_{period_name.lower()}.txt')
     try:
         await ctx.author.send(file=file)
@@ -1016,28 +1047,42 @@ async def _export_raw_activity(ctx, days, period_name):
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def export_data(ctx):
-    """Export all database data as JSON for migration"""
+    """Export all database data as JSON for migration (PRs from API, XP from local)"""
+    import json
+    
+    # Get PRs from API
+    prs = []
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{API_BASE_URL}/prs?limit=10000", timeout=15.0)
+            if response.status_code == 200:
+                api_prs = response.json()
+                for pr in api_prs:
+                    prs.append({
+                        "user_id": pr.get("user_id", ""),
+                        "username": pr.get("username", ""),
+                        "exercise": pr.get("exercise", ""),
+                        "weight": pr.get("weight", 0),
+                        "reps": pr.get("reps", 0),
+                        "estimated_1rm": pr.get("estimated_1rm", 0),
+                        "timestamp": pr.get("timestamp", "")
+                    })
+    except Exception as e:
+        await ctx.send(f"⚠️ Error fetching PRs from API: {e}")
+    
+    # Get XP from local
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    
-    # Export PRs
-    c.execute('SELECT user_id, username, exercise, weight, reps, estimated_1rm, timestamp FROM prs')
-    prs = [{"user_id": r[0], "username": r[1], "exercise": r[2], "weight": r[3], "reps": r[4], "estimated_1rm": r[5], "timestamp": r[6]} for r in c.fetchall()]
-    
-    # Export XP
     c.execute('SELECT user_id, username, total_xp, level FROM user_xp')
     xp = [{"user_id": r[0], "username": r[1], "total_xp": r[2], "level": r[3]} for r in c.fetchall()]
-    
     conn.close()
     
     data = {"prs": prs, "xp": xp}
     
-    # Send as file
-    import json
     file_content = json.dumps(data, indent=2)
     file = discord.File(io.BytesIO(file_content.encode('utf-8')), filename='ttm_data_export.json')
     
-    await ctx.author.send(f"Exported {len(prs)} PRs and {len(xp)} XP records")
+    await ctx.author.send(f"Exported {len(prs)} PRs (from API) and {len(xp)} XP records (from local)")
     await ctx.author.send(file=file)
     await ctx.send("✅ Data exported to your DMs!")
 
