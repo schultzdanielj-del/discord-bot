@@ -200,8 +200,6 @@ def normalize_exercise_name(exercise: str, weight: Optional[float] = None) -> st
         exercise = re.sub(r'\bbench\b', 'bench press', exercise)
 
     # 9. TRX EXERCISE NORMALIZATION
-    exercise = re.sub(r'\btrx bicep tricep\b', 'trx tricep', exercise)
-    exercise = re.sub(r'\btrx bicep curl tricep\b', 'trx tricep', exercise)
     if re.search(r'\btrx bicep\b', exercise) and 'curl' not in exercise:
         exercise = re.sub(r'\btrx bicep\b', 'trx bicep curl', exercise)
     if re.search(r'\btrx tricep\b', exercise) and 'extension' not in exercise:
