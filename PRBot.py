@@ -1086,6 +1086,60 @@ async def export_data(ctx):
     await ctx.author.send(file=file)
     await ctx.send("✅ Data exported to your DMs!")
 
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def dump_core_foods(ctx):
+    """Dump all core_foods_checkins from local SQLite as JSON for migration to PostgreSQL"""
+    import json
+    
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    
+    c.execute('SELECT id, user_id, date, message_id, timestamp, xp_awarded FROM core_foods_checkins ORDER BY timestamp')
+    rows = c.fetchall()
+    
+    # Also get summary stats
+    c.execute('SELECT user_id, COUNT(*) FROM core_foods_checkins GROUP BY user_id')
+    user_counts = c.fetchall()
+    
+    c.execute('SELECT MIN(date), MAX(date) FROM core_foods_checkins')
+    date_range = c.fetchone()
+    
+    conn.close()
+    
+    records = []
+    for row in rows:
+        records.append({
+            "id": row[0],
+            "user_id": row[1],
+            "date": row[2],
+            "message_id": row[3],
+            "timestamp": row[4],
+            "xp_awarded": row[5]
+        })
+    
+    data = {
+        "total_records": len(records),
+        "date_range": {"earliest": date_range[0], "latest": date_range[1]} if date_range[0] else None,
+        "per_user": {uid: count for uid, count in user_counts},
+        "records": records
+    }
+    
+    file_content = json.dumps(data, indent=2)
+    file = discord.File(io.BytesIO(file_content.encode('utf-8')), filename='core_foods_dump.json')
+    
+    summary = f"🍎 **Core Foods Dump**\n"
+    summary += f"Total records: {len(records)}\n"
+    if date_range[0]:
+        summary += f"Date range: {date_range[0]} to {date_range[1]}\n"
+    summary += f"\n**Per user:**\n"
+    for uid, count in user_counts:
+        summary += f"- {uid}: {count} check-ins\n"
+    
+    await ctx.author.send(summary)
+    await ctx.author.send(file=file)
+    await ctx.send("✅ Core foods dump sent to your DMs!")
+
 if __name__ == '__main__':
     TOKEN = os.getenv('DISCORD_BOT_TOKEN')
     
