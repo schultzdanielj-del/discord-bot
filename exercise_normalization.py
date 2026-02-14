@@ -199,18 +199,12 @@ def normalize_exercise_name(exercise: str, weight: Optional[float] = None) -> st
     if 'bench' in exercise and 'press' not in exercise and 'bench press' not in exercise:
         exercise = re.sub(r'\bbench\b', 'bench press', exercise)
 
-    # 9. TRX EXERCISE NORMALIZATION
-    if re.search(r'\btrx bicep\b', exercise) and 'curl' not in exercise:
-        exercise = re.sub(r'\btrx bicep\b', 'trx bicep curl', exercise)
-    if re.search(r'\btrx tricep\b', exercise) and 'extension' not in exercise:
-        exercise = re.sub(r'\btrx tricep\b', 'trx tricep extension', exercise)
-
-    # 10. STRIP TRAILING MODIFIERS
+    # 9. STRIP TRAILING MODIFIERS
     exercise = re.sub(r'\s+\d+\s*second.*$', '', exercise)
     exercise = re.sub(r'\s+(each|per)\s+side$', '', exercise)
     exercise = re.sub(r'\s+x\d+$', '', exercise)
 
-    # 11. EXERCISE-SPECIFIC RULES
+    # 10. EXERCISE-SPECIFIC RULES
 
     # Lateral raises
     if 'lateral' in exercise and 'raise' not in exercise:
@@ -354,13 +348,13 @@ def normalize_exercise_name(exercise: str, weight: Optional[float] = None) -> st
     exercise = re.sub(r'\b\d+ \d+ \d+\b', '', exercise)
     exercise = re.sub(r'\b\d+-\d+-\d+\b', '', exercise)
 
-    # 12. INCLINE ANGLE NORMALIZATION (presses only)
+    # 11. INCLINE ANGLE NORMALIZATION (presses only)
     if 'press' in exercise:
         exercise = re.sub(r'\b(30 degree|low) incline\b', 'low incline', exercise)
         exercise = re.sub(r'\b(60 degree|high|steep) incline\b', 'high incline', exercise)
         exercise = re.sub(r'\b45 degree incline\b', 'incline', exercise)
 
-    # 13. REMOVE DUPLICATE CONSECUTIVE WORDS
+    # 12. REMOVE DUPLICATE CONSECUTIVE WORDS
     words = exercise.split()
     if words:
         deduplicated = [words[0]]
@@ -377,7 +371,6 @@ def normalize_exercise_name(exercise: str, weight: Optional[float] = None) -> st
 if __name__ == "__main__":
     test_cases = [
         ("dumbbell tricep tricep extension", "dumbbell tricep extension"),
-        ("trx tricep tricep extension", "trx tricep extension"),
         ("incline ex bar triceps extensions", "incline ez bar tricep extension"),
         ("weighte dips", "weighted dip"),
         ("lateral raise raise", "lateral raise"),
@@ -388,11 +381,8 @@ if __name__ == "__main__":
         ("bent row", "barbell row"),
         ("cable curl", "cable bicep curl"),
         ("face pull", "facepull"),
-        ("skullcrushers 85/12", "tricep extension 85/12"),
         ("romaninan deadlift", "romanian deadlift"),
         ("stragiht bar curl", "straight bar curl"),
-        ("trx bicep 25/12", "trx bicep curl 25/12"),
-        ("trx tricep 25/12", "trx tricep extension 25/12"),
     ]
 
     print("Testing normalize_exercise_name():\n")
