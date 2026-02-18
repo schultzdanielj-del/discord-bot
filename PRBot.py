@@ -379,6 +379,31 @@ async def on_message_edit(before, after):
         return
     if before.content == after.content:
         return
+
+    # Coach message edit: if this is a reply to a bot message, update the coach message
+    if after.reference and after.reference.message_id:
+        try:
+            replied_to = await after.channel.fetch_message(after.reference.message_id)
+            if replied_to.author.bot and replied_to.author.id == bot.user.id:
+                async with httpx.AsyncClient() as client:
+                    try:
+                        resp = await client.put(
+                            f"{API_BASE_URL}/coach-messages/{after.id}",
+                            json={"message_text": after.content},
+                            headers={"X-Admin-Key": os.environ.get("ADMIN_KEY", "4ifQC_DLzlXM1c5PC6egwvf2p5GgbMR3")},
+                            timeout=10.0,
+                        )
+                        if resp.status_code == 200:
+                            await after.add_reaction("✏️")
+                            print(f"✏️ Coach message updated for discord_msg_id {after.id}: {after.content[:50]}")
+                        else:
+                            print(f"⚠️ Coach message update returned {resp.status_code}: {resp.text}")
+                    except Exception as e:
+                        print(f"❌ Error updating coach message: {e}")
+                return  # Don't process as PR edit
+        except Exception:
+            pass
+
     if after.content.strip().startswith('*'):
         return
     deleted_count = await delete_prs_by_message_api(str(after.id))
