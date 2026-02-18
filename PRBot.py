@@ -274,6 +274,52 @@ async def on_message(message):
     if message.author.bot:
         return
     channel_id = str(message.channel.id)
+
+    # Coach messaging: detect replies to bot messages in #pr-city
+    if channel_id == PR_CHANNEL_ID and message.reference and message.reference.message_id:
+        try:
+            replied_to = await message.channel.fetch_message(message.reference.message_id)
+            if replied_to.author.bot and replied_to.author.id == bot.user.id:
+                # This is a reply to our bot's message — treat as coach message
+                # Parse display name from the bot message (first word(s) before a verb/keyword)
+                bot_content = replied_to.content
+                # Bot messages follow patterns like "{name} ate their core foods..."
+                # or "{name} just beat their last personal best..."
+                target_user_id = None
+                async with httpx.AsyncClient() as client:
+                    try:
+                        resp = await client.get(f"{API_BASE_URL}/dashboard/members", timeout=10.0)
+                        if resp.status_code == 200:
+                            members = resp.json()
+                            for m in members:
+                                uname = m.get("username", "")
+                                if uname and bot_content.startswith(uname):
+                                    target_user_id = m.get("user_id")
+                                    break
+                    except Exception as e:
+                        print(f"❌ Error fetching members for coach msg: {e}")
+
+                if target_user_id:
+                    async with httpx.AsyncClient() as client:
+                        try:
+                            await client.post(
+                                f"{API_BASE_URL}/coach-messages",
+                                json={
+                                    "user_id": target_user_id,
+                                    "message_text": message.content,
+                                    "discord_msg_id": str(message.id),
+                                },
+                                headers={"X-Admin-Key": os.environ.get("ADMIN_KEY", "4ifQC_DLzlXM1c5PC6egwvf2p5GgbMR3")},
+                                timeout=10.0,
+                            )
+                            await message.add_reaction("✉️")
+                            print(f"✉️ Coach message stored for user {target_user_id}: {message.content[:50]}")
+                        except Exception as e:
+                            print(f"❌ Error storing coach message: {e}")
+                else:
+                    print(f"⚠️ Could not identify user from bot message: {bot_content[:60]}")
+        except Exception as e:
+            print(f"❌ Error processing coach reply: {e}")
     if channel_id == PR_CHANNEL_ID:
         if message.content.strip().startswith('*'):
             await bot.process_commands(message)
