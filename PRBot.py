@@ -371,31 +371,42 @@ async def on_message(message):
     await bot.process_commands(message)
 
 @bot.event
-async def on_message_edit(before, after):
-    """Handle edited messages in the PR channel"""
-    if after.author.bot:
+async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
+    """Handle edited messages in the PR channel — uses raw event to work regardless of cache"""
+    # payload.data is the raw gateway dict; channel_id is always present
+    channel_id = str(payload.channel_id)
+    if channel_id != PR_CHANNEL_ID:
         return
-    if str(after.channel.id) != PR_CHANNEL_ID:
+
+    # Fetch the full message (not from cache)
+    try:
+        channel = bot.get_channel(payload.channel_id)
+        if not channel:
+            channel = await bot.fetch_channel(payload.channel_id)
+        message = await channel.fetch_message(payload.message_id)
+    except Exception as e:
+        print(f"⚠️ Could not fetch edited message {payload.message_id}: {e}")
         return
-    if before.content == after.content:
+
+    if message.author.bot:
         return
 
     # Coach message edit: if this is a reply to a bot message, update the coach message
-    if after.reference and after.reference.message_id:
+    if message.reference and message.reference.message_id:
         try:
-            replied_to = await after.channel.fetch_message(after.reference.message_id)
+            replied_to = await channel.fetch_message(message.reference.message_id)
             if replied_to.author.bot and replied_to.author.id == bot.user.id:
                 async with httpx.AsyncClient() as client:
                     try:
                         resp = await client.put(
-                            f"{API_BASE_URL}/coach-messages/{after.id}",
-                            json={"message_text": after.content},
+                            f"{API_BASE_URL}/coach-messages/{message.id}",
+                            json={"message_text": message.content},
                             headers={"X-Admin-Key": os.environ.get("ADMIN_KEY", "4ifQC_DLzlXM1c5PC6egwvf2p5GgbMR3")},
                             timeout=10.0,
                         )
                         if resp.status_code == 200:
-                            await after.add_reaction("✏️")
-                            print(f"✏️ Coach message updated for discord_msg_id {after.id}: {after.content[:50]}")
+                            await message.add_reaction("✏️")
+                            print(f"✏️ Coach message updated for discord_msg_id {message.id}: {message.content[:50]}")
                         else:
                             print(f"⚠️ Coach message update returned {resp.status_code}: {resp.text}")
                     except Exception as e:
@@ -404,29 +415,29 @@ async def on_message_edit(before, after):
         except Exception:
             pass
 
-    if after.content.strip().startswith('*'):
+    if message.content.strip().startswith('*'):
         return
-    deleted_count = await delete_prs_by_message_api(str(after.id))
-    program_exercises = await get_user_program_exercises(str(after.author.id))
-    pr_data = parse_pr_message(after.content, program_exercises)
+    deleted_count = await delete_prs_by_message_api(str(message.id))
+    program_exercises = await get_user_program_exercises(str(message.author.id))
+    pr_data = parse_pr_message(message.content, program_exercises)
     if pr_data:
         success = await store_pr(
-            str(after.author.id), after.author.name,
+            str(message.author.id), message.author.name,
             pr_data['canonical_exercise'], pr_data['weight'],
             pr_data['reps'], pr_data['estimated_1rm'],
-            str(after.id), str(after.channel.id)
+            str(message.id), str(message.channel.id)
         )
         if success:
-            await after.add_reaction('🔄')
+            await message.add_reaction('🔄')
             fuzzy_note = " (fuzzy matched)" if pr_data['used_fuzzy'] else ""
-            print(f'Updated PR: {after.author.name} - {pr_data["canonical_exercise"]} '
+            print(f'Updated PR: {message.author.name} - {pr_data["canonical_exercise"]} '
                   f'{pr_data["weight"]}/{pr_data["reps"]}{fuzzy_note}')
             if deleted_count > 0:
-                print(f'Replaced {deleted_count} old PR(s) with new data for message {after.id}')
+                print(f'Replaced {deleted_count} old PR(s) with new data for message {message.id}')
     else:
         if deleted_count > 0:
-            await after.add_reaction('❌')
-            print(f'Removed {deleted_count} PR(s) from edited message {after.id} (no longer valid)')
+            await message.add_reaction('❌')
+            print(f'Removed {deleted_count} PR(s) from edited message {message.id} (no longer valid)')
 
 @bot.event
 async def on_raw_message_delete(payload):
