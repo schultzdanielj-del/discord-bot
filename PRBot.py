@@ -275,6 +275,53 @@ async def on_message(message):
         return
     channel_id = str(message.channel.id)
 
+    # Coach messaging: detect replies to bot DMs (user dashboard reply notifications)
+    if message.guild is None and message.reference and message.reference.message_id:
+        try:
+            replied_to = await message.channel.fetch_message(message.reference.message_id)
+            if replied_to.author.id == bot.user.id:
+                # Dan replied to a bot DM — parse user name from "**Name**: message" format
+                bot_content = replied_to.content
+                if bot_content.startswith("**") and "**:" in bot_content:
+                    display_name = bot_content.split("**")[1]
+                    target_user_id = None
+                    async with httpx.AsyncClient() as client:
+                        try:
+                            resp = await client.get(f"{API_BASE_URL}/dashboard/members", timeout=10.0)
+                            if resp.status_code == 200:
+                                members = resp.json()
+                                for m in members:
+                                    full = m.get("full_name", "") or ""
+                                    uname = m.get("username", "") or ""
+                                    if (full and full == display_name) or (uname and uname == display_name):
+                                        target_user_id = m.get("user_id")
+                                        break
+                        except Exception as e:
+                            print(f"❌ Error fetching members for DM coach msg: {e}")
+
+                    if target_user_id:
+                        async with httpx.AsyncClient() as client:
+                            try:
+                                await client.post(
+                                    f"{API_BASE_URL}/coach-messages",
+                                    json={
+                                        "user_id": target_user_id,
+                                        "message_text": message.content,
+                                        "discord_msg_id": str(message.id),
+                                    },
+                                    headers={"X-Admin-Key": os.environ.get("ADMIN_KEY", "4ifQC_DLzlXM1c5PC6egwvf2p5GgbMR3")},
+                                    timeout=10.0,
+                                )
+                                await message.add_reaction("✉️")
+                                print(f"✉️ Coach DM reply stored for user {target_user_id}: {message.content[:50]}")
+                            except Exception as e:
+                                print(f"❌ Error storing DM coach message: {e}")
+                    else:
+                        print(f"⚠️ Could not identify user from DM bot message: {bot_content[:60]}")
+        except Exception as e:
+            print(f"❌ Error processing DM coach reply: {e}")
+        return
+
     # Coach messaging: detect replies to bot messages in #pr-city
     if channel_id == PR_CHANNEL_ID and message.reference and message.reference.message_id:
         try:
