@@ -16,6 +16,10 @@ from core_foods_api import can_award_core_foods_xp as can_award_core_foods_xp_ap
 
 API_BASE_URL = "https://ttm-metrics-api-production.up.railway.app/api"
 
+# Feature flag: set to True to re-enable Discord PR logging via free-text messages
+# Disabled Feb 24, 2026 — all PR logging now goes through the dashboard which enforces canonical exercise names
+DISCORD_PR_LOGGING_ENABLED = False
+
 # Flask app for keep-alive
 app = Flask('')
 
@@ -386,23 +390,24 @@ async def on_message(message):
             else:
                 await message.add_reaction('✅')
         else:
-            program_exercises = await get_user_program_exercises(str(message.author.id))
-            pr_data = parse_pr_message(message.content, program_exercises)
-            if pr_data:
-                success = await store_pr(
-                    str(message.author.id), message.author.name,
-                    pr_data['canonical_exercise'], pr_data['weight'],
-                    pr_data['reps'], pr_data['estimated_1rm'],
-                    str(message.id), str(message.channel.id)
-                )
-                if success:
-                    xp_earned = 100
-                    add_xp(str(message.author.id), message.author.name, xp_earned, "PR logged")
-                    await message.add_reaction('💪')
-                    fuzzy_note = " (fuzzy matched)" if pr_data['used_fuzzy'] else ""
-                    print(f'Logged PR: {message.author.name} - {pr_data["canonical_exercise"]} '
-                          f'{pr_data["weight"]}/{pr_data["reps"]} '
-                          f'(Est. 1RM: {pr_data["estimated_1rm"]:.1f}){fuzzy_note}')
+            if DISCORD_PR_LOGGING_ENABLED:
+                program_exercises = await get_user_program_exercises(str(message.author.id))
+                pr_data = parse_pr_message(message.content, program_exercises)
+                if pr_data:
+                    success = await store_pr(
+                        str(message.author.id), message.author.name,
+                        pr_data['canonical_exercise'], pr_data['weight'],
+                        pr_data['reps'], pr_data['estimated_1rm'],
+                        str(message.id), str(message.channel.id)
+                    )
+                    if success:
+                        xp_earned = 100
+                        add_xp(str(message.author.id), message.author.name, xp_earned, "PR logged")
+                        await message.add_reaction('💪')
+                        fuzzy_note = " (fuzzy matched)" if pr_data['used_fuzzy'] else ""
+                        print(f'Logged PR: {message.author.name} - {pr_data["canonical_exercise"]} '
+                              f'{pr_data["weight"]}/{pr_data["reps"]} '
+                              f'(Est. 1RM: {pr_data["estimated_1rm"]:.1f}){fuzzy_note}')
     elif channel_id == LOGS_CHANNEL_ID:
         if len(message.content) >= 300:
             if can_award_weekly_log_xp(str(message.author.id)):
