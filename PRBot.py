@@ -557,7 +557,17 @@ async def progress_command(ctx):
         for exercise in sorted(exercise_prs.keys()):
             prs_list = exercise_prs[exercise]
             is_bodyweight = all(pr['weight'] == 0 for pr in prs_list)
-            if is_bodyweight:
+            has_bw = any(pr['weight'] == 0 for pr in prs_list)
+            has_weighted = any(pr['weight'] > 0 for pr in prs_list)
+            is_bw_to_weighted = has_bw and has_weighted
+            if is_bw_to_weighted:
+                # Mixed BW and weighted — show latest PR only, no % comparison
+                latest = max(prs_list, key=lambda x: x.get('timestamp', ''))
+                if latest['weight'] > 0:
+                    lines.append(f"**{exercise}**: {latest['estimated_1rm']:.0f}lb e1RM (transitioned from bodyweight)")
+                else:
+                    lines.append(f"**{exercise}**: {latest['reps']} reps (BW)")
+            elif is_bodyweight:
                 min_pr = min(prs_list, key=lambda x: x['reps'])
                 max_pr = max(prs_list, key=lambda x: x['reps'])
                 min_reps = min_pr['reps']
@@ -723,10 +733,14 @@ async def _generate_content_summary(ctx, days, period_name):
         for pr in sorted(data['prs'], key=lambda x: x['timestamp']):
             ex = pr['exercise']
             if ex not in exercise_progress:
-                exercise_progress[ex] = {'first': pr['est_1rm'], 'last': pr['est_1rm']}
+                exercise_progress[ex] = {'first': pr['est_1rm'], 'last': pr['est_1rm'], 'first_weight': pr['weight'], 'last_weight': pr['weight']}
             else:
                 exercise_progress[ex]['last'] = pr['est_1rm']
+                exercise_progress[ex]['last_weight'] = pr['weight']
         for ex, progress in exercise_progress.items():
+            # Skip BW→weighted transitions
+            if progress['first_weight'] == 0 and progress['last_weight'] > 0:
+                continue
             improvement = progress['last'] - progress['first']
             if improvement >= 20:
                 standout_moments.append(f"{data['username']} added +{improvement:.0f}lbs to {ex}")
