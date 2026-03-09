@@ -15,6 +15,7 @@ from fuzzy_matching import parse_pr_message, get_canonical_with_tiebreaker
 from core_foods_api import can_award_core_foods_xp as can_award_core_foods_xp_api, record_core_foods_checkin as record_core_foods_checkin_api, get_core_foods_counts
 
 API_BASE_URL = "https://ttm-metrics-api-production.up.railway.app/api"
+ADMIN_HEADERS = {"X-Admin-Key": os.environ.get("ADMIN_KEY", "4ifQC_DLzlXM1c5PC6egwvf2p5GgbMR3")}
 
 # Feature flag: set to True to re-enable Discord PR logging via free-text messages
 # Disabled Feb 24, 2026 — all PR logging now goes through the dashboard which enforces canonical exercise names
@@ -237,6 +238,7 @@ async def store_pr(user_id, username, exercise, weight, reps, estimated_1rm, mes
             response = await client.post(
                 f"{API_BASE_URL}/prs",
                 json={"user_id": user_id, "username": username, "exercise": exercise, "weight": weight, "reps": reps},
+                headers=ADMIN_HEADERS,
                 timeout=10.0
             )
             response.raise_for_status()
@@ -252,7 +254,7 @@ async def delete_prs_by_message_api(message_id):
     """Delete all PR entries associated with a message ID via API"""
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.delete(f"{API_BASE_URL}/prs/message/{message_id}", timeout=10.0)
+            response = await client.delete(f"{API_BASE_URL}/prs/message/{message_id}", headers=ADMIN_HEADERS, timeout=10.0)
             response.raise_for_status()
             data = response.json()
             deleted_count = data.get("deleted_count", 0)
@@ -291,7 +293,7 @@ async def on_message(message):
                     target_user_id = None
                     async with httpx.AsyncClient() as client:
                         try:
-                            resp = await client.get(f"{API_BASE_URL}/dashboard/members", timeout=10.0)
+                            resp = await client.get(f"{API_BASE_URL}/dashboard/members", headers=ADMIN_HEADERS, timeout=10.0)
                             if resp.status_code == 200:
                                 members = resp.json()
                                 for m in members:
@@ -313,7 +315,7 @@ async def on_message(message):
                                         "message_text": message.content,
                                         "discord_msg_id": str(message.id),
                                     },
-                                    headers={"X-Admin-Key": os.environ.get("ADMIN_KEY", "4ifQC_DLzlXM1c5PC6egwvf2p5GgbMR3")},
+                                    headers=ADMIN_HEADERS,
                                     timeout=10.0,
                                 )
                                 await message.add_reaction("✉️")
@@ -339,7 +341,7 @@ async def on_message(message):
                 target_user_id = None
                 async with httpx.AsyncClient() as client:
                     try:
-                        resp = await client.get(f"{API_BASE_URL}/dashboard/members", timeout=10.0)
+                        resp = await client.get(f"{API_BASE_URL}/dashboard/members", headers=ADMIN_HEADERS, timeout=10.0)
                         if resp.status_code == 200:
                             members = resp.json()
                             for m in members:
@@ -360,7 +362,7 @@ async def on_message(message):
                                     "message_text": message.content,
                                     "discord_msg_id": str(message.id),
                                 },
-                                headers={"X-Admin-Key": os.environ.get("ADMIN_KEY", "4ifQC_DLzlXM1c5PC6egwvf2p5GgbMR3")},
+                                headers=ADMIN_HEADERS,
                                 timeout=10.0,
                             )
                             await message.add_reaction("✉️")
@@ -453,7 +455,7 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
                         resp = await client.put(
                             f"{API_BASE_URL}/coach-messages/{message.id}",
                             json={"message_text": message.content},
-                            headers={"X-Admin-Key": os.environ.get("ADMIN_KEY", "4ifQC_DLzlXM1c5PC6egwvf2p5GgbMR3")},
+                            headers=ADMIN_HEADERS,
                             timeout=10.0,
                         )
                         if resp.status_code == 200:
